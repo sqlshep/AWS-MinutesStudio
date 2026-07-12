@@ -1,0 +1,30 @@
+## .NET build output
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+[Bb]in/
+[Oo]bj/
+
+## User-specific / secrets
+*.user
+*.suo
+secrets.json
+appsettings.*.local.json
+.env
+
+## Rider / VS / VS Code
+.vs/
+.idea/
+*.DotSettings.user
+
+## macOS
+.DS_Store
+
+## Publish output
+publish/
+*.publishsettings

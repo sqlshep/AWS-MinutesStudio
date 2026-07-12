@@ -1,0 +1,27 @@
+@page "/prompts"
+
+<PageTitle>Team B Studio — Prompt Library</PageTitle>
+
+<div class="studio">
+    <header class="studio-header">
+        <h1>Prompt Library</h1>
+        <p class="subtitle">
+            Four grounded, production-ready prompt templates for the most common Team B work products.
+            Each is annotated with the key design decisions behind it.
+        </p>
+    </header>
+
+    @foreach (var t in PromptLibrary.All)
+    {
+        <section class="prompt-doc">
+            <h2>@t.DisplayName</h2>
+            <p class="prompt-desc">@t.Description</p>
+
+            <h4>Design notes</h4>
+            <p class="design-notes">@t.DesignNotes</p>
+
+            <h4>System prompt</h4>
+            <pre class="prompt-source">@t.SystemPrompt</pre>
+        </section>
+    }
+</div>

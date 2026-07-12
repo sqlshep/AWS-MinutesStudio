@@ -1,0 +1,404 @@
+@page "/ingest"
+@rendermode InteractiveServer
+@inject IIngestionService IngestionService
+@inject ISearchService SearchService
+@inject IBlobDocumentSource BlobSource
+@inject IConnectionChecker ConnectionChecker
+@inject IOptions<RagOptions> RagOptions
+@inject IOptions<AzureSearchOptions> SearchOptions
+@inject ILogger<Ingest> Logger
+@using System.Globalization
+@using Microsoft.AspNetCore.Components.Forms
+@using Microsoft.Extensions.Options
+@using TeamB.Core.Configuration
+
+<PageTitle>Team B Studio — Documents</PageTitle>
+
+<div class="studio">
+    <header class="studio-header">
+        <h1>Documents &amp; Indexing</h1>
+        <p class="subtitle">
+            Source PDFs live in @BlobSource.Description (Azure Blob Storage). Ingestion extracts text,
+            chunks it, embeds each chunk with text-embedding-3-large, and uploads to the vector index.
+        </p>
+    </header>
+
+    <section class="prompt-box conn-panel">
+        <div class="conn-head">
+            <span class="conn-title">Service connection</span>
+            <button class="btn-secondary" @onclick="CheckConnection" disabled="@_busy">
+                @if (_checking)
+                {
+                    <span class="spinner spinner-dark"></span>
+                    <span>Checking…</span>
+                }
+                else
+                {
+                    <span>Check connection</span>
+                }
+            </button>
+        </div>
+        @if (_connReport is not null)
+        {
+            <ul class="conn-list">
+                @foreach (var dep in _connReport.Dependencies)
+                {
+                    <li class="conn-item @(dep.Ok ? "ok" : "bad")">
+                        <span class="conn-dot"></span>
+                        <span class="conn-name">@dep.Name</span>
+                        <span class="conn-detail">@dep.Detail</span>
+                        <span class="conn-ms">@dep.ElapsedMs ms</span>
+                    </li>
+                }
+            </ul>
+        }
+        else
+        {
+            <p class="upload-hint">Verify embeddings, chat, and search are reachable before ingesting.</p>
+        }
+    </section>
+
+    <section class="prompt-box">
+        <div class="index-status">
+            <span>PDFs in blob container:</span>
+            <strong>@(_blobFiles?.Count.ToString() ?? "—")</strong>
+            <button class="btn-secondary" @onclick="RefreshBlobs" disabled="@_busy">Refresh</button>
+        </div>
+
+        @if (_blobFiles is { Count: > 0 })
+        {
+            <ul class="blob-file-list">
+                @foreach (var name in _blobFiles)
+                {
+                    <li>@name</li>
+                }
+            </ul>
+        }
+        else if (_blobFiles is { Count: 0 })
+        {
+            <p class="doc-empty">Container is empty. Seed it with the samples or upload your own PDF below.</p>
+        }
+
+        <div class="upload-grid">
+            <div class="upload-card">
+                <h3>Seed with samples</h3>
+                <p class="upload-hint">Pushes the bundled meeting-minute PDFs into the container. Handy for testing.</p>
+                <button class="btn-secondary" @onclick="UploadSamples" disabled="@_busy">
+                    @if (_uploading)
+                    {
+                        <span class="spinner spinner-dark"></span>
+                        <span>Uploading…</span>
+                    }
+                    else
+                    {
+                        <span>Upload samples to Blob</span>
+                    }
+                </button>
+            </div>
+
+            <div class="upload-card">
+                <h3>Upload your own PDF</h3>
+                <p class="upload-hint">Pick a PDF from your machine to add it to the container.</p>
+                <InputFile OnChange="UploadFromDisk" accept=".pdf" disabled="@_busy" />
+                @if (_uploadedName is not null)
+                {
+                    <p class="upload-ok">Uploaded @_uploadedName</p>
+                }
+            </div>
+        </div>
+    </section>
+
+    <section class="prompt-box index-panel">
+        <div class="panel-head">
+            <div class="panel-title">
+                <h2>Search index</h2>
+                <p class="panel-sub">
+                    Index <code>@SearchOptions.Value.IndexName</code> ·
+                    <strong>@(_documents?.Count.ToString() ?? "—")</strong> document(s) ·
+                    <strong>@(_count?.ToString() ?? "—")</strong> passage(s)
+                </p>
+            </div>
+            <div class="panel-actions">
+                <button class="btn-primary" @onclick="RunIngest" disabled="@_busy">
+                    @if (_ingesting)
+                    {
+                        <span class="spinner"></span>
+                        <span>Ingesting…</span>
+                    }
+                    else
+                    {
+                        <span>Ingest from Blob</span>
+                    }
+                </button>
+                <button class="btn-secondary" @onclick="RefreshIndex" disabled="@_busy">Refresh</button>
+                <button class="btn-danger" @onclick="() => _confirmDelete = true"
+                        disabled="@(_busy || _documents is null or { Count: 0 })">Delete all</button>
+            </div>
+        </div>
+
+        @if (_confirmDelete)
+        {
+            <div class="confirm-bar">
+                <span>Delete the entire index? This drops and recreates it — all @(_count?.ToString() ?? "") passages are removed.</span>
+                <div class="confirm-actions">
+                    <button class="btn-danger" @onclick="DeleteAll" disabled="@_busy">
+                        @if (_deleting)
+                        {
+                            <span class="spinner"></span>
+                            <span>Deleting…</span>
+                        }
+                        else
+                        {
+                            <span>Yes, delete all</span>
+                        }
+                    </button>
+                    <button class="btn-secondary" @onclick="() => _confirmDelete = false" disabled="@_busy">Cancel</button>
+                </div>
+            </div>
+        }
+
+        @if (_documents is null)
+        {
+            <p class="doc-empty"><span class="spinner spinner-dark"></span> Loading…</p>
+        }
+        else if (_documents.Count == 0)
+        {
+            <p class="doc-empty">Index is empty. Seed the container above, then <strong>Ingest from Blob</strong>.</p>
+        }
+        else
+        {
+            <table class="doc-table">
+                <thead>
+                    <tr><th>Meeting</th><th>Date</th><th>File</th><th class="num">Chunks</th></tr>
+                </thead>
+                <tbody>
+                    @foreach (var doc in _documents)
+                    {
+                        <tr>
+                            <td>@doc.Title</td>
+                            <td>@FormatDate(doc.MeetingDate)</td>
+                            <td class="doc-file">@doc.SourceFile</td>
+                            <td class="num">@doc.ChunkCount</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        }
+
+        @if (_report is not null)
+        {
+            <p class="panel-note">
+                Last ingest: <strong>@_report.FilesProcessed</strong> file(s), <strong>@_report.ChunksIndexed</strong> chunks.
+            </p>
+        }
+    </section>
+
+    @if (_error is not null)
+    {
+        <div class="alert alert-error">@_error</div>
+    }
+</div>
+
+@code {
+    private bool _busy;
+    private bool _uploading;
+    private bool _ingesting;
+    private bool _deleting;
+    private bool _checking;
+    private bool _confirmDelete;
+    private ConnectionReport? _connReport;
+    private long? _count;
+    private string? _error;
+    private IngestionReport? _report;
+    private IReadOnlyList<DocumentInfo>? _documents;
+    private IReadOnlyList<string>? _blobFiles;
+    private string? _uploadedName;
+
+    private const long MaxUploadBytes = 50 * 1024 * 1024;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshBlobs();
+        await RefreshIndex();
+    }
+
+    private async Task RefreshIndex()
+    {
+        await RefreshCount();
+        await RefreshDocuments();
+    }
+
+    private async Task CheckConnection()
+    {
+        _error = null;
+        _checking = true;
+        _busy = true;
+        try
+        {
+            _connReport = await ConnectionChecker.CheckAsync();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Connection check failed.");
+            _error = AzureErrorHelper.Describe(ex);
+        }
+        finally
+        {
+            _checking = false;
+            _busy = false;
+        }
+    }
+
+    private async Task RefreshBlobs()
+    {
+        try
+        {
+            var refs = await BlobSource.ListAsync();
+            _blobFiles = refs.Select(r => r.FileName).ToList();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not list blobs.");
+            _error = $"Could not reach Blob Storage: {AzureErrorHelper.Describe(ex)}";
+            _blobFiles = null;
+        }
+    }
+
+    private async Task UploadSamples()
+    {
+        _error = null;
+        _uploadedName = null;
+        _uploading = true;
+        _busy = true;
+        try
+        {
+            var uploaded = await BlobSource.UploadFromFolderAsync(RagOptions.Value.SamplesPath);
+            Logger.LogInformation("Uploaded {Count} sample(s) to Blob.", uploaded.Count);
+            await RefreshBlobs();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Upload to Blob failed.");
+            _error = $"Upload failed: {AzureErrorHelper.Describe(ex)}";
+        }
+        finally
+        {
+            _uploading = false;
+            _busy = false;
+        }
+    }
+
+    private async Task UploadFromDisk(InputFileChangeEventArgs e)
+    {
+        _error = null;
+        _uploadedName = null;
+        var file = e.File;
+        if (file is null) return;
+
+        if (!file.Name.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+        {
+            _error = "Only PDF files are supported.";
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            await using var stream = file.OpenReadStream(MaxUploadBytes);
+            await BlobSource.UploadAsync(file.Name, stream);
+            _uploadedName = file.Name;
+            Logger.LogInformation("Uploaded {File} from disk to Blob.", file.Name);
+            await RefreshBlobs();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Upload from disk failed.");
+            _error = $"Upload failed: {AzureErrorHelper.Describe(ex)}";
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task RefreshCount()
+    {
+        try
+        {
+            _count = await SearchService.GetDocumentCountAsync();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not read document count.");
+            _count = null;
+        }
+    }
+
+    private async Task RefreshDocuments()
+    {
+        try
+        {
+            _documents = await SearchService.ListDocumentsAsync();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not list documents.");
+            _documents = Array.Empty<DocumentInfo>();
+        }
+    }
+
+    private static string FormatDate(string? isoDate) =>
+        DateOnly.TryParse(isoDate, CultureInfo.InvariantCulture, out var d)
+            ? d.ToString("MMM d, yyyy", CultureInfo.InvariantCulture)
+            : "—";
+
+    private async Task RunIngest()
+    {
+        _error = null;
+        _report = null;
+        _confirmDelete = false;
+        _ingesting = true;
+        _busy = true;
+
+        try
+        {
+            _report = await IngestionService.IngestAsync(reset: false);
+            await RefreshIndex();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Ingestion failed.");
+            _error = $"Ingestion failed: {AzureErrorHelper.Describe(ex)}";
+        }
+        finally
+        {
+            _ingesting = false;
+            _busy = false;
+        }
+    }
+
+    private async Task DeleteAll()
+    {
+        _error = null;
+        _report = null;
+        _deleting = true;
+        _busy = true;
+
+        try
+        {
+            await SearchService.ResetIndexAsync();
+            await RefreshIndex();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Delete-all failed.");
+            _error = $"Delete failed: {AzureErrorHelper.Describe(ex)}";
+        }
+        finally
+        {
+            _deleting = false;
+            _confirmDelete = false;
+            _busy = false;
+        }
+    }
+}

@@ -1,0 +1,166 @@
+﻿@page "/"
+@rendermode InteractiveServer
+@inject IRagService RagService
+@inject ISearchService SearchService
+@inject ILogger<Home> Logger
+
+<PageTitle>Team B Studio — Work Products</PageTitle>
+
+<div class="studio">
+    <header class="studio-header">
+        <h1>Work Product Generator</h1>
+        <p class="subtitle">
+            Pick a meeting (or all of them), then click a format. The draft is generated straight
+            from the source minutes and cited back to them — no prompt-writing required.
+        </p>
+    </header>
+
+    @if (_documents is null)
+    {
+        <div class="prompt-box"><span class="spinner spinner-dark"></span> Loading documents…</div>
+    }
+    else if (_documents.Count == 0)
+    {
+        <div class="alert alert-warn">
+            No documents are indexed yet. Go to <a href="ingest">Documents</a> and ingest the meeting minutes first.
+        </div>
+    }
+    else
+    {
+        <section class="doc-picker">
+            <span class="picker-label">Source</span>
+            <div class="pill-row">
+                <button type="button" class="pill @(_selectedSource is null ? "selected" : "")"
+                        @onclick="() => SelectSource(null)" disabled="@_busy">
+                    All meetings
+                </button>
+                @foreach (var doc in _documents)
+                {
+                    <button type="button" class="pill @(_selectedSource == doc.SourceFile ? "selected" : "")"
+                            @onclick="() => SelectSource(doc.SourceFile)" disabled="@_busy">
+                        @doc.Title
+                    </button>
+                }
+            </div>
+        </section>
+
+        <section class="format-picker">
+            @foreach (var template in PromptLibrary.All)
+            {
+                <button type="button" class="format-card"
+                        @onclick="() => Generate(template.WorkProduct)" disabled="@_busy">
+                    <span class="format-name">
+                        @template.DisplayName
+                        @if (_busyType == template.WorkProduct)
+                        {
+                            <span class="spinner spinner-dark"></span>
+                        }
+                    </span>
+                    <span class="format-desc">@template.Description</span>
+                </button>
+            }
+        </section>
+
+        @if (_busy && _status is not null)
+        {
+            <div class="gen-status"><span class="spinner spinner-dark"></span> @_status</div>
+        }
+    }
+
+    @if (_error is not null)
+    {
+        <div class="alert alert-error">@_error</div>
+    }
+
+    @if (_result is not null)
+    {
+        @if (_result.Warning is not null)
+        {
+            <div class="alert alert-warn">@_result.Warning</div>
+        }
+
+        @if (!string.IsNullOrWhiteSpace(_result.Content))
+        {
+            <section class="output">
+                <div class="output-header">
+                    <h2>@PromptLibrary.Get(_result.WorkProduct).DisplayName</h2>
+                    <span class="output-scope">@_scopeLabel</span>
+                </div>
+                <article class="output-body">
+                    @MarkdownHelper.ToHtml(_result.Content)
+                </article>
+            </section>
+
+            @if (_result.Sources.Count > 0)
+            {
+                <section class="sources">
+                    <h3>Grounded in @_result.Sources.Count document(s)</h3>
+                    <ul>
+                        @foreach (var s in _result.Sources)
+                        {
+                            <li><span class="src-title">@s.Title</span> <span class="src-meta">@s.SourceFile</span></li>
+                        }
+                    </ul>
+                </section>
+            }
+        }
+    }
+</div>
+
+@code {
+    private IReadOnlyList<DocumentInfo>? _documents;
+    private string? _selectedSource;
+    private bool _busy;
+    private WorkProductType? _busyType;
+    private string? _error;
+    private string? _status;
+    private string _scopeLabel = string.Empty;
+    private GenerationResult? _result;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _documents = await SearchService.ListDocumentsAsync();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to load documents.");
+            _documents = Array.Empty<DocumentInfo>();
+            _error = $"Could not load documents: {ex.Message}";
+        }
+    }
+
+    private void SelectSource(string? sourceFile) => _selectedSource = sourceFile;
+
+    private async Task Generate(WorkProductType type)
+    {
+        _error = null;
+        _result = null;
+        _busy = true;
+        _busyType = type;
+        _status = "Starting\u2026";
+        _scopeLabel = _selectedSource is null
+            ? "All meetings"
+            : _documents?.FirstOrDefault(d => d.SourceFile == _selectedSource)?.Title ?? "Selected meeting";
+
+        var progress = new Progress<string>(msg =>
+            _ = InvokeAsync(() => { _status = msg; StateHasChanged(); }));
+
+        try
+        {
+            _result = await RagService.GenerateWorkProductAsync(type, _selectedSource, progress);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Work product generation failed.");
+            _error = $"Something went wrong: {ex.Message}";
+        }
+        finally
+        {
+            _busy = false;
+            _busyType = null;
+            _status = null;
+        }
+    }
+}
