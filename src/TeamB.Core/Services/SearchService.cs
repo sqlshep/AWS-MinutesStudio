@@ -24,7 +24,12 @@ public interface ISearchService
     Task<IReadOnlyList<DocumentInfo>> ListDocumentsAsync(CancellationToken ct = default);
 
     Task<long> GetDocumentCountAsync(CancellationToken ct = default);
+
+    /// <summary>Creates a fresh, uniquely-named (timestamped) index and makes it the active one.</summary>
     Task ResetIndexAsync(CancellationToken ct = default);
+
+    /// <summary>The name of the index currently being read/written (newest timestamped index), or null if none.</summary>
+    Task<string?> GetActiveIndexNameAsync(CancellationToken ct = default);
 }
 
 /// <summary>
@@ -38,10 +43,14 @@ public sealed class AzureSearchService : ISearchService
     private const string HnswConfig = "hnsw-config";
 
     private readonly SearchIndexClient _indexClient;
-    private readonly SearchClient _searchClient;
     private readonly AzureSearchOptions _options;
     private readonly int _dimensions;
     private readonly ILogger<AzureSearchService> _logger;
+
+    /// <summary>Configured IndexName is treated as a prefix; each concrete index is "{prefix}-{yyyyMMdd-HHmmss}".</summary>
+    private readonly string _prefix;
+    private readonly SemaphoreSlim _activeLock = new(1, 1);
+    private string? _activeIndex;
 
     public AzureSearchService(
         IOptions<AzureSearchOptions> searchOptions,
@@ -51,64 +60,113 @@ public sealed class AzureSearchService : ISearchService
         _options = searchOptions.Value;
         _dimensions = openAiOptions.Value.EmbeddingDimensions;
         _logger = logger;
+        _prefix = _options.IndexName;
 
         var endpoint = new Uri(_options.Endpoint);
-        if (!string.IsNullOrWhiteSpace(_options.ApiKey))
+        _indexClient = string.IsNullOrWhiteSpace(_options.ApiKey)
+            ? new SearchIndexClient(endpoint, new DefaultAzureCredential())
+            : new SearchIndexClient(endpoint, new AzureKeyCredential(_options.ApiKey));
+    }
+
+    /// <summary>Resolves (and caches) the newest index matching the prefix. Timestamped names sort chronologically.</summary>
+    public async Task<string?> GetActiveIndexNameAsync(CancellationToken ct = default)
+    {
+        if (_activeIndex is not null) return _activeIndex;
+
+        await _activeLock.WaitAsync(ct);
+        try
         {
-            var credential = new AzureKeyCredential(_options.ApiKey);
-            _indexClient = new SearchIndexClient(endpoint, credential);
-            _searchClient = new SearchClient(endpoint, _options.IndexName, credential);
+            if (_activeIndex is not null) return _activeIndex;
+
+            var matches = new List<string>();
+            await foreach (var name in _indexClient.GetIndexNamesAsync(ct))
+            {
+                if (name.StartsWith(_prefix + "-", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(name, _prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    matches.Add(name);
+                }
+            }
+
+            _activeIndex = matches
+                .OrderByDescending(n => n, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault();
+            return _activeIndex;
         }
-        else
+        finally
         {
-            var credential = new DefaultAzureCredential();
-            _indexClient = new SearchIndexClient(endpoint, credential);
-            _searchClient = new SearchClient(endpoint, _options.IndexName, credential);
+            _activeLock.Release();
         }
+    }
+
+    private async Task<SearchClient> GetActiveSearchClientAsync(CancellationToken ct)
+    {
+        var name = await GetActiveIndexNameAsync(ct)
+            ?? throw new InvalidOperationException("No search index exists yet. Ingest documents first.");
+        return _indexClient.GetSearchClient(name);
+    }
+
+    private async Task<string> CreateNewIndexAsync(CancellationToken ct)
+    {
+        var name = $"{_prefix}-{DateTime.Now:yyyyMMdd-HHmmss}";
+        await _indexClient.CreateOrUpdateIndexAsync(BuildIndex(name), cancellationToken: ct);
+
+        await _activeLock.WaitAsync(ct);
+        try { _activeIndex = name; }
+        finally { _activeLock.Release(); }
+
+        _logger.LogInformation("Created search index '{Index}'.", name);
+        return name;
     }
 
     public async Task EnsureIndexAsync(CancellationToken ct = default)
     {
-        var exists = false;
-        await foreach (var name in _indexClient.GetIndexNamesAsync(ct))
+        var active = await GetActiveIndexNameAsync(ct);
+        if (active is not null)
         {
-            if (string.Equals(name, _options.IndexName, StringComparison.OrdinalIgnoreCase))
-            {
-                exists = true;
-                break;
-            }
-        }
-
-        if (exists)
-        {
-            _logger.LogInformation("Search index '{Index}' already exists.", _options.IndexName);
+            _logger.LogInformation("Using existing search index '{Index}'.", active);
             return;
         }
 
-        var index = BuildIndex();
-        await _indexClient.CreateOrUpdateIndexAsync(index, cancellationToken: ct);
-        _logger.LogInformation("Created search index '{Index}'.", _options.IndexName);
+        await CreateNewIndexAsync(ct);
     }
 
     public async Task ResetIndexAsync(CancellationToken ct = default)
     {
-        try
+        // Snapshot the existing prefix-matching indexes so we can clean them up after switching.
+        var old = new List<string>();
+        await foreach (var name in _indexClient.GetIndexNamesAsync(ct))
         {
-            await _indexClient.DeleteIndexAsync(_options.IndexName, ct);
-        }
-        catch (RequestFailedException ex) when (ex.Status == 404)
-        {
-            // Nothing to delete.
+            if (name.StartsWith(_prefix + "-", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, _prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                old.Add(name);
+            }
         }
 
-        await _indexClient.CreateOrUpdateIndexAsync(BuildIndex(), cancellationToken: ct);
-        _logger.LogInformation("Reset search index '{Index}'.", _options.IndexName);
+        // Create a brand-new, ready-to-use index (no delete-then-recreate race on the same name).
+        var created = await CreateNewIndexAsync(ct);
+
+        // Best-effort cleanup of the now-orphaned older indexes.
+        foreach (var name in old.Where(n => !string.Equals(n, created, StringComparison.OrdinalIgnoreCase)))
+        {
+            try
+            {
+                await _indexClient.DeleteIndexAsync(name, ct);
+                _logger.LogInformation("Deleted old search index '{Index}'.", name);
+            }
+            catch (RequestFailedException ex)
+            {
+                _logger.LogWarning(ex, "Could not delete old index '{Index}'.", name);
+            }
+        }
     }
 
     public async Task UploadAsync(IReadOnlyList<DocumentChunk> chunks, CancellationToken ct = default)
     {
         if (chunks.Count == 0) return;
 
+        var client = await GetActiveSearchClientAsync(ct);
         var documents = chunks.Select(c => new SearchIndexDocument
         {
             Id = c.Id,
@@ -127,10 +185,10 @@ public sealed class AzureSearchService : ISearchService
         for (var i = 0; i < documents.Count; i += batchSize)
         {
             var batch = documents.Skip(i).Take(batchSize).ToList();
-            await _searchClient.MergeOrUploadDocumentsAsync(batch, cancellationToken: ct);
+            await client.MergeOrUploadDocumentsAsync(batch, cancellationToken: ct);
         }
 
-        _logger.LogInformation("Uploaded {Count} chunks to '{Index}'.", documents.Count, _options.IndexName);
+        _logger.LogInformation("Uploaded {Count} chunks to '{Index}'.", documents.Count, _activeIndex);
     }
 
     public async Task<IReadOnlyList<RetrievedChunk>> SearchAsync(
@@ -158,8 +216,12 @@ public sealed class AzureSearchService : ISearchService
         options.Select.Add("meetingDate");
         options.Select.Add("chunkIndex");
 
+        var active = await GetActiveIndexNameAsync(ct);
+        if (active is null) return Array.Empty<RetrievedChunk>();
+        var client = _indexClient.GetSearchClient(active);
+
         // Passing queryText alongside the vector query makes this a hybrid search.
-        var response = await _searchClient.SearchAsync<SearchIndexDocument>(queryText, options, ct);
+        var response = await client.SearchAsync<SearchIndexDocument>(queryText, options, ct);
 
         var results = new List<RetrievedChunk>();
         await foreach (var item in response.Value.GetResultsAsync())
@@ -192,7 +254,11 @@ public sealed class AzureSearchService : ISearchService
         if (!string.IsNullOrWhiteSpace(sourceFile))
             options.Filter = $"sourceFile eq '{sourceFile.Replace("'", "''")}'";
 
-        var response = await _searchClient.SearchAsync<SearchIndexDocument>("*", options, ct);
+        var active = await GetActiveIndexNameAsync(ct);
+        if (active is null) return Array.Empty<RetrievedChunk>();
+        var client = _indexClient.GetSearchClient(active);
+
+        var response = await client.SearchAsync<SearchIndexDocument>("*", options, ct);
 
         var results = new List<RetrievedChunk>();
         await foreach (var item in response.Value.GetResultsAsync())
@@ -235,9 +301,12 @@ public sealed class AzureSearchService : ISearchService
 
     public async Task<long> GetDocumentCountAsync(CancellationToken ct = default)
     {
+        var active = await GetActiveIndexNameAsync(ct);
+        if (active is null) return 0;
+
         try
         {
-            var response = await _searchClient.GetDocumentCountAsync(ct);
+            var response = await _indexClient.GetSearchClient(active).GetDocumentCountAsync(ct);
             return response.Value;
         }
         catch (RequestFailedException ex) when (ex.Status == 404)
@@ -246,7 +315,7 @@ public sealed class AzureSearchService : ISearchService
         }
     }
 
-    private SearchIndex BuildIndex() => new(_options.IndexName)
+    private SearchIndex BuildIndex(string indexName) => new(indexName)
     {
         Fields =
         {

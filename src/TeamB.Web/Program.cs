@@ -29,6 +29,8 @@ builder.Services.AddSingleton<ITextChunker, TextChunker>();
 builder.Services.AddSingleton<IEmbeddingService, AzureOpenAIEmbeddingService>();
 builder.Services.AddSingleton<ISearchService, AzureSearchService>();
 builder.Services.AddSingleton<IGenerationService, AzureOpenAIGenerationService>();
+builder.Services.AddSingleton<IBillLinker, BillLinker>();
+builder.Services.AddSingleton<ICitationPreviewer, CitationPreviewer>();
 
 // Blob-backed document source (Phase 4). Registered as both the concrete uploader and the
 // storage-agnostic source consumed by the ingestion pipeline.
@@ -62,12 +64,30 @@ app.MapPost("/api/ingest", async (bool? reset, IIngestionService ingestion, Canc
 app.MapPost("/api/blob/upload-samples", async (IBlobDocumentSource blob, IOptions<RagOptions> rag, CancellationToken ct) =>
     Results.Ok(await blob.UploadFromFolderAsync(rag.Value.SamplesPath, ct)));
 
-app.MapGet("/api/workproduct", async (string type, string? sourceFile, IRagService rag, CancellationToken ct) =>
+app.MapGet("/api/blob/preview", async (string name, IBlobDocumentSource blob, CancellationToken ct) =>
+{
+    try
+    {
+        var stream = await blob.DownloadAsync(name, ct);
+        // No download name => inline Content-Disposition, so the browser renders the PDF in-tab.
+        return Results.File(stream, "application/pdf", enableRangeProcessing: true);
+    }
+    catch (Exception)
+    {
+        return Results.NotFound($"Blob '{name}' not found.");
+    }
+});
+
+app.MapGet("/api/workproduct", async (string type, string? sourceFile, string? tone, string? length, IRagService rag, CancellationToken ct) =>
 {
     if (!Enum.TryParse<WorkProductType>(type, ignoreCase: true, out var workProduct))
         return Results.BadRequest($"Unknown work product '{type}'. Valid: {string.Join(", ", Enum.GetNames<WorkProductType>())}.");
 
-    return Results.Ok(await rag.GenerateWorkProductAsync(workProduct, sourceFile, progress: null, ct));
+    var options = new GenerationOptions(
+        Enum.TryParse<WorkProductLength>(length, ignoreCase: true, out var l) ? l : WorkProductLength.Standard,
+        Enum.TryParse<WorkProductTone>(tone, ignoreCase: true, out var t) ? t : WorkProductTone.Default);
+
+    return Results.Ok(await rag.GenerateWorkProductAsync(workProduct, sourceFile, options, progress: null, ct));
 });
 
 app.MapGet("/api/ask", async (string q, string? sourceFile, IRagService rag, CancellationToken ct) =>

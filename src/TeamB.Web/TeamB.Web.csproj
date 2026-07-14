@@ -8,6 +8,11 @@
     <PackageReference Include="Markdig" Version="0.37.0" />
   </ItemGroup>
 
+  <!-- Ship the architecture doc with the app (single source of truth stays in /docs). -->
+  <ItemGroup>
+    <Content Include="..\..\docs\data-architecture.md" Link="Content\data-architecture.md" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>

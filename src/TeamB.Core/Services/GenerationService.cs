@@ -2,16 +2,20 @@ using Azure.AI.OpenAI;
 using Microsoft.Extensions.Options;
 using OpenAI.Chat;
 using TeamB.Core.Configuration;
+using TeamB.Core.Models;
 using TeamB.Core.Prompts;
 
 namespace TeamB.Core.Services;
 
+/// <summary>A completed generation: the text plus the tokens it consumed.</summary>
+public sealed record CompletionResult(string Text, TokenUsage Usage);
+
 public interface IGenerationService
 {
-    Task<string> CompleteAsync(PromptTemplate template, string request, string context, CancellationToken ct = default);
+    Task<CompletionResult> CompleteAsync(PromptTemplate template, string request, string context, CancellationToken ct = default);
 
     /// <summary>Runs a completion from an explicit system + user prompt (used by document chat).</summary>
-    Task<string> CompleteAsync(string systemPrompt, string userPrompt, CancellationToken ct = default);
+    Task<CompletionResult> CompleteAsync(string systemPrompt, string userPrompt, CancellationToken ct = default);
 }
 
 /// <summary>Runs a grounded chat completion against the Azure OpenAI (Foundry) chat deployment.</summary>
@@ -24,11 +28,11 @@ public sealed class AzureOpenAIGenerationService : IGenerationService
         _client = client.GetChatClient(options.Value.ChatDeployment);
     }
 
-    public Task<string> CompleteAsync(
+    public Task<CompletionResult> CompleteAsync(
         PromptTemplate template, string request, string context, CancellationToken ct = default) =>
         CompleteAsync(template.SystemPrompt, template.BuildUserPrompt(request, context), ct);
 
-    public async Task<string> CompleteAsync(string systemPrompt, string userPrompt, CancellationToken ct = default)
+    public async Task<CompletionResult> CompleteAsync(string systemPrompt, string userPrompt, CancellationToken ct = default)
     {
         var messages = new List<ChatMessage>
         {
@@ -41,6 +45,12 @@ public sealed class AzureOpenAIGenerationService : IGenerationService
         // in favor of "max_completion_tokens" — so we omit the cap and let the prompt bound length.
         var completion = await Retry.OnTransientAsync(
             () => _client.CompleteChatAsync(messages, cancellationToken: ct), ct: ct);
-        return string.Concat(completion.Value.Content.Select(part => part.Text));
+
+        var text = string.Concat(completion.Value.Content.Select(part => part.Text));
+        var u = completion.Value.Usage;
+        var usage = u is null
+            ? TokenUsage.Zero
+            : new TokenUsage(u.InputTokenCount, u.OutputTokenCount, u.TotalTokenCount);
+        return new CompletionResult(text, usage);
     }
 }

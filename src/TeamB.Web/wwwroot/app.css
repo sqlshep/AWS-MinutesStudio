@@ -186,6 +186,7 @@ h1:focus {
 .output-header h2 { font-size: 1.05rem; margin: 0; }
 
 .output-body { padding: 1.25rem 1.5rem; line-height: 1.55; }
+.output-footer { display: flex; justify-content: flex-end; padding: 0 1.5rem 1.1rem; }
 .output-body h2 { font-size: 1.15rem; color: var(--tb-navy); margin-top: 1.1rem; }
 .output-body h3 { font-size: 1rem; color: var(--tb-navy); margin-top: 1rem; }
 .output-body ul, .output-body ol { padding-left: 1.3rem; }
@@ -221,7 +222,11 @@ h1:focus {
 .doc-file { color: var(--tb-muted); font-size: .82rem; }
 
 .blob-file-list { list-style: none; padding: 0; margin: 0 0 1rem; display: flex; flex-direction: column; gap: .3rem; }
-.blob-file-list li { font-size: .85rem; color: var(--tb-text); padding: .35rem .6rem; background: var(--tb-surface-2, #f6f7f9); border-radius: 6px; }
+.blob-file-list li { font-size: .85rem; color: var(--tb-text); padding: .4rem .5rem .4rem .7rem; background: var(--tb-surface-2, #f6f7f9); border-radius: 6px; display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+.blob-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.blob-preview { flex: none; display: inline-flex; align-items: center; gap: .35rem; font-size: .78rem; font-weight: 600; color: var(--tb-navy); text-decoration: none; border: 1px solid var(--tb-navy); border-radius: 999px; padding: .22rem .7rem; background: #fff; transition: background .12s ease, color .12s ease; }
+.blob-preview::before { content: ""; width: 13px; height: 13px; background: currentColor; -webkit-mask: no-repeat center / contain url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 3C4.5 3 1.7 5.1.5 8c1.2 2.9 4 5 7.5 5s6.3-2.1 7.5-5C14.3 5.1 11.5 3 8 3zm0 8a3 3 0 110-6 3 3 0 010 6zm0-4.5A1.5 1.5 0 108 9.5 1.5 1.5 0 008 6.5z'/%3E%3C/svg%3E"); mask: no-repeat center / contain url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 3C4.5 3 1.7 5.1.5 8c1.2 2.9 4 5 7.5 5s6.3-2.1 7.5-5C14.3 5.1 11.5 3 8 3zm0 8a3 3 0 110-6 3 3 0 010 6zm0-4.5A1.5 1.5 0 108 9.5 1.5 1.5 0 008 6.5z'/%3E%3C/svg%3E"); }
+.blob-preview:hover { background: var(--tb-navy); color: #fff; }
 
 .upload-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
 @media (max-width: 640px) { .upload-grid { grid-template-columns: 1fr; } }
@@ -301,6 +306,36 @@ h1:focus {
 .pill.selected { background: var(--tb-navy); color: #fff; border-color: var(--tb-navy); }
 .pill:disabled { opacity: .6; cursor: default; }
 
+/* Tone / length style controls */
+.style-controls { display: flex; flex-wrap: wrap; gap: 1.75rem; margin: 1rem 0 .25rem; }
+.seg {
+    display: inline-flex;
+    gap: 4px;
+    padding: 4px;
+    background: #eef2f8;
+    border: 1px solid var(--tb-border);
+    border-radius: 10px;
+}
+.seg-btn {
+    appearance: none;
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    padding: .4rem .95rem;
+    font-size: .84rem;
+    font-weight: 600;
+    color: var(--tb-muted);
+    cursor: pointer;
+    transition: background .15s, color .15s, box-shadow .15s;
+}
+.seg-btn:hover:not(:disabled):not(.selected) { color: var(--tb-text); background: rgba(255,255,255,.6); }
+.seg-btn.selected {
+    background: #fff;
+    color: var(--tb-accent);
+    box-shadow: 0 1px 3px rgba(15,42,74,.18);
+}
+.seg-btn:disabled { opacity: .55; cursor: default; }
+
 .format-card:disabled { opacity: .7; cursor: default; }
 .format-name { display: flex; align-items: center; gap: .5rem; }
 
@@ -311,7 +346,24 @@ h1:focus {
 }
 
 .output-header { display: flex; align-items: baseline; justify-content: space-between; }
-.output-scope { font-size: .8rem; opacity: .85; }
+.output-meta { display: flex; align-items: baseline; gap: .75rem; }
+.output-scope { font-size: .8rem; opacity: .85; margin-right: .25rem; }
+.token-badge { font-size: .72rem; font-weight: 600; color: #fff; background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.28); border-radius: 999px; padding: .12rem .55rem; white-space: nowrap; cursor: default; }
+
+/* Rendered architecture / markdown document */
+.doc-content { background: #fff; border: 1px solid var(--tb-border); border-radius: 10px; padding: 1.5rem 1.75rem; line-height: 1.6; }
+.doc-content h1 { font-size: 1.5rem; color: var(--tb-navy); margin: .2rem 0 1rem; }
+.doc-content h2 { font-size: 1.2rem; color: var(--tb-navy); margin: 1.8rem 0 .6rem; padding-bottom: .3rem; border-bottom: 1px solid var(--tb-border); }
+.doc-content h3 { font-size: 1rem; color: var(--tb-navy); margin: 1.2rem 0 .4rem; }
+.doc-content p { margin: .5rem 0; }
+.doc-content ul, .doc-content ol { padding-left: 1.4rem; }
+.doc-content code { background: var(--tb-surface-2, #f6f7f9); padding: .1rem .35rem; border-radius: 4px; font-size: .85em; }
+.doc-content pre:not(.mermaid) { background: #0d1117; color: #e6edf3; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+.doc-content pre:not(.mermaid) code { background: none; color: inherit; padding: 0; }
+.doc-content table { border-collapse: collapse; width: 100%; margin: .8rem 0; font-size: .88rem; }
+.doc-content th, .doc-content td { border: 1px solid var(--tb-border); padding: .45rem .6rem; text-align: left; vertical-align: top; }
+.doc-content th { background: var(--tb-surface-2, #f6f7f9); font-weight: 600; }
+.doc-content pre.mermaid { background: #fff; text-align: center; margin: 1rem 0; overflow-x: auto; }
 
 .gen-status {
     display: flex;
@@ -385,3 +437,31 @@ h1:focus {
     resize: vertical;
 }
 .chat-input textarea:focus { outline: none; border-color: var(--tb-accent); box-shadow: 0 0 0 3px rgba(47,111,235,.12); }
+
+/* Citation source preview — hover/focus a "[Meeting]" citation to see a source excerpt. */
+.cite {
+    position: relative;
+    border-bottom: 1px dotted var(--tb-accent);
+    cursor: help;
+    outline: none;
+}
+.cite::after {
+    content: attr(data-preview);
+    position: absolute;
+    left: 0;
+    bottom: 135%;
+    z-index: 30;
+    display: none;
+    width: min(360px, 80vw);
+    white-space: normal;
+    background: #1f2937;
+    color: #f8fafc;
+    font-size: .8rem;
+    font-weight: 400;
+    line-height: 1.45;
+    text-align: left;
+    padding: .55rem .7rem;
+    border-radius: 8px;
+    box-shadow: 0 10px 28px rgba(15,23,42,.3);
+}
+.cite:hover::after, .cite:focus::after { display: block; }

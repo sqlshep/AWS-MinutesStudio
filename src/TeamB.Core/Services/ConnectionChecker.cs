@@ -29,20 +29,17 @@ public sealed class ConnectionChecker : IConnectionChecker
     private readonly IGenerationService _generation;
     private readonly ISearchService _search;
     private readonly AzureOpenAIOptions _openAi;
-    private readonly AzureSearchOptions _searchOptions;
 
     public ConnectionChecker(
         IEmbeddingService embeddings,
         IGenerationService generation,
         ISearchService search,
-        IOptions<AzureOpenAIOptions> openAi,
-        IOptions<AzureSearchOptions> searchOptions)
+        IOptions<AzureOpenAIOptions> openAi)
     {
         _embeddings = embeddings;
         _generation = generation;
         _search = search;
         _openAi = openAi.Value;
-        _searchOptions = searchOptions.Value;
     }
 
     public async Task<ConnectionReport> CheckAsync(CancellationToken ct = default)
@@ -59,10 +56,13 @@ public sealed class ConnectionChecker : IConnectionChecker
                 await _generation.CompleteAsync("You are a health probe. Reply with 'ok'.", "ping", ct);
                 return "OK";
             }),
-            await ProbeAsync($"Search ({_searchOptions.IndexName})", async () =>
+            await ProbeAsync("Search", async () =>
             {
+                var index = await _search.GetActiveIndexNameAsync(ct);
                 var count = await _search.GetDocumentCountAsync(ct);
-                return $"OK — {count} passage(s) indexed";
+                return index is null
+                    ? "OK — no index yet (ingest to create one)"
+                    : $"OK — {count} passage(s) in '{index}'";
             })
         };
 

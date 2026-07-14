@@ -17,26 +17,28 @@ public static partial class DocumentMetadata
 
         string? isoDate = null;
         var dateLabel = string.Empty;
+        var afterDate = name;
         var match = LeadingDateRegex().Match(name);
         if (match.Success
             && int.TryParse(match.Groups[1].Value, out var month)
             && int.TryParse(match.Groups[2].Value, out var day)
-            && int.TryParse(match.Groups[3].Value, out var shortYear))
+            && int.TryParse(match.Groups[3].Value, out var yearValue))
         {
-            var year = 2000 + shortYear;
+            // Accept 2- or 4-digit years (e.g. "26" -> 2026, "2026" -> 2026).
+            var year = yearValue >= 100 ? yearValue : 2000 + yearValue;
             if (TryBuildDate(year, month, day, out var date))
             {
                 isoDate = date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
                 dateLabel = date.ToString("MMMM d, yyyy", CultureInfo.InvariantCulture);
+                afterDate = name[match.Length..];
             }
         }
 
-        // Grab the descriptive part after "--", strip any trailing GUID suffix.
-        var descriptor = name;
-        var dashIndex = name.IndexOf("--", StringComparison.Ordinal);
-        if (dashIndex >= 0)
-            descriptor = name[(dashIndex + 2)..];
-        descriptor = GuidSuffixRegex().Replace(descriptor, string.Empty).Replace('_', ' ').Trim();
+        // Descriptor = everything after the leading date; drop any GUID suffix and normalize separators.
+        var descriptor = GuidSuffixRegex().Replace(afterDate, string.Empty).Replace('_', ' ');
+        descriptor = descriptor.Trim().Trim('-').Trim();      // strip a leading "--" separator
+        descriptor = SeparatorRegex().Replace(descriptor, " \u2014 ");   // " -- " -> " — "
+        descriptor = WhitespaceRegex().Replace(descriptor, " ").Trim();
         if (descriptor.Length == 0) descriptor = "Meeting";
 
         var title = dateLabel.Length > 0 ? $"{descriptor} \u2014 {dateLabel}" : descriptor;
@@ -57,9 +59,15 @@ public static partial class DocumentMetadata
         }
     }
 
-    [GeneratedRegex(@"^\s*(\d{1,2})\s+(\d{1,2})\s+(\d{2})")]
+    [GeneratedRegex(@"^\s*(\d{1,2})\s+(\d{1,2})\s+(\d{2,4})")]
     private static partial Regex LeadingDateRegex();
 
     [GeneratedRegex(@"[_\s-]*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")]
     private static partial Regex GuidSuffixRegex();
+
+    [GeneratedRegex(@"\s*--\s*")]
+    private static partial Regex SeparatorRegex();
+
+    [GeneratedRegex(@"\s+")]
+    private static partial Regex WhitespaceRegex();
 }

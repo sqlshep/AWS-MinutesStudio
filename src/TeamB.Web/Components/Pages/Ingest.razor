@@ -70,7 +70,10 @@
             <ul class="blob-file-list">
                 @foreach (var name in _blobFiles)
                 {
-                    <li>@name</li>
+                    <li>
+                        <span class="blob-file-name">@name</span>
+                        <a class="blob-preview" href="@PreviewUrl(name)" target="_blank" rel="noopener">Preview</a>
+                    </li>
                 }
             </ul>
         }
@@ -113,7 +116,7 @@
             <div class="panel-title">
                 <h2>Search index</h2>
                 <p class="panel-sub">
-                    Index <code>@SearchOptions.Value.IndexName</code> ·
+                    Index <code>@(_indexName ?? "(none yet)")</code> ·
                     <strong>@(_documents?.Count.ToString() ?? "—")</strong> document(s) ·
                     <strong>@(_count?.ToString() ?? "—")</strong> passage(s)
                 </p>
@@ -213,6 +216,7 @@
     private IReadOnlyList<DocumentInfo>? _documents;
     private IReadOnlyList<string>? _blobFiles;
     private string? _uploadedName;
+    private string? _indexName;
 
     private const long MaxUploadBytes = 50 * 1024 * 1024;
 
@@ -224,6 +228,8 @@
 
     private async Task RefreshIndex()
     {
+        try { _indexName = await SearchService.GetActiveIndexNameAsync(); }
+        catch (Exception ex) { Logger.LogWarning(ex, "Could not resolve active index."); _indexName = null; }
         await RefreshCount();
         await RefreshDocuments();
     }
@@ -346,6 +352,9 @@
             _documents = Array.Empty<DocumentInfo>();
         }
     }
+
+    private static string PreviewUrl(string fileName) =>
+        $"/api/blob/preview?name={Uri.EscapeDataString(fileName)}";
 
     private static string FormatDate(string? isoDate) =>
         DateOnly.TryParse(isoDate, CultureInfo.InvariantCulture, out var d)

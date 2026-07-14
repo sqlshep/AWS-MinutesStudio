@@ -2,6 +2,7 @@
 @rendermode InteractiveServer
 @inject IRagService RagService
 @inject ISearchService SearchService
+@inject IJSRuntime JS
 @inject ILogger<Home> Logger
 
 <PageTitle>Team B Studio — Work Products</PageTitle>
@@ -41,6 +42,29 @@
                         @doc.Title
                     </button>
                 }
+            </div>
+        </section>
+
+        <section class="style-controls">
+            <div class="style-group">
+                <span class="picker-label">Length</span>
+                <div class="seg">
+                    @foreach (var l in Lengths)
+                    {
+                        <button type="button" class="seg-btn @(_length == l ? "selected" : "")"
+                                @onclick="() => _length = l" disabled="@_busy">@l.ToString()</button>
+                    }
+                </div>
+            </div>
+            <div class="style-group">
+                <span class="picker-label">Tone</span>
+                <div class="seg">
+                    @foreach (var t in Tones)
+                    {
+                        <button type="button" class="seg-btn @(_tone == t ? "selected" : "")"
+                                @onclick="() => _tone = t" disabled="@_busy">@ToneLabel(t)</button>
+                    }
+                </div>
             </div>
         </section>
 
@@ -84,11 +108,31 @@
             <section class="output">
                 <div class="output-header">
                     <h2>@PromptLibrary.Get(_result.WorkProduct).DisplayName</h2>
-                    <span class="output-scope">@_scopeLabel</span>
+                    <div class="output-meta">
+                        <span class="output-scope">@_scopeLabel</span>
+                        @if (_result.Usage.TotalTokens > 0)
+                        {
+                            <span class="token-badge"
+                                  title="@($"{_result.Usage.TotalTokens:N0} total tokens")">
+                                @_result.Usage.InputTokens.ToString("N0") in / @_result.Usage.OutputTokens.ToString("N0") out
+                            </span>
+                        }
+                    </div>
                 </div>
                 <article class="output-body">
                     @MarkdownHelper.ToHtml(_result.Content)
                 </article>
+                <div class="output-footer">
+                    <button class="btn-secondary" @onclick="CopyOutput">
+                        @(_copied ? "Copied!" : "Copy text")
+                    </button>
+                    @if (_lastType is not null)
+                    {
+                        <button class="btn-secondary" @onclick="Regenerate" disabled="@_busy">
+                            Regenerate
+                        </button>
+                    }
+                </div>
             </section>
 
             @if (_result.Sources.Count > 0)
@@ -108,14 +152,22 @@
 </div>
 
 @code {
+    private static readonly WorkProductLength[] Lengths = Enum.GetValues<WorkProductLength>();
+    private static readonly WorkProductTone[] Tones = Enum.GetValues<WorkProductTone>();
+    private static string ToneLabel(WorkProductTone tone) => tone == WorkProductTone.Default ? "Neutral" : tone.ToString();
+
     private IReadOnlyList<DocumentInfo>? _documents;
     private string? _selectedSource;
     private bool _busy;
     private WorkProductType? _busyType;
+    private WorkProductType? _lastType;
+    private WorkProductLength _length = WorkProductLength.Standard;
+    private WorkProductTone _tone = WorkProductTone.Default;
     private string? _error;
     private string? _status;
     private string _scopeLabel = string.Empty;
     private GenerationResult? _result;
+    private bool _copied;
 
     protected override async Task OnInitializedAsync()
     {
@@ -133,12 +185,29 @@
 
     private void SelectSource(string? sourceFile) => _selectedSource = sourceFile;
 
+    private async Task CopyOutput()
+    {
+        if (_result is null || string.IsNullOrEmpty(_result.Content)) return;
+
+        var ok = await JS.InvokeAsync<bool>("copyToClipboard", MarkdownHelper.ToCopyText(_result.Content));
+        if (!ok) return;
+
+        _copied = true;
+        StateHasChanged();
+        await Task.Delay(1800);
+        _copied = false;
+    }
+
+    private Task Regenerate() => _lastType is null ? Task.CompletedTask : Generate(_lastType.Value);
+
     private async Task Generate(WorkProductType type)
     {
         _error = null;
         _result = null;
+        _copied = false;
         _busy = true;
         _busyType = type;
+        _lastType = type;
         _status = "Starting\u2026";
         _scopeLabel = _selectedSource is null
             ? "All meetings"
@@ -149,7 +218,8 @@
 
         try
         {
-            _result = await RagService.GenerateWorkProductAsync(type, _selectedSource, progress);
+            var options = new GenerationOptions(_length, _tone);
+            _result = await RagService.GenerateWorkProductAsync(type, _selectedSource, options, progress);
         }
         catch (Exception ex)
         {

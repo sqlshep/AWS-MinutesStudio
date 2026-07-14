@@ -13,7 +13,7 @@ public interface IRagService
     /// (or all documents when sourceFile is null) and runs the work-product prompt. Using full
     /// text — rather than a few retrieved snippets — keeps facts like vote tallies intact.
     /// </summary>
-    Task<GenerationResult> GenerateWorkProductAsync(WorkProductType workProduct, string? sourceFile, IProgress<string>? progress = null, CancellationToken ct = default);
+    Task<GenerationResult> GenerateWorkProductAsync(WorkProductType workProduct, string? sourceFile, GenerationOptions? options = null, IProgress<string>? progress = null, CancellationToken ct = default);
 
     /// <summary>
     /// Free-form document chat. When <paramref name="sourceFile"/> is supplied, answers from that
@@ -28,24 +28,31 @@ public sealed class RagService : IRagService
     private readonly IEmbeddingService _embeddings;
     private readonly ISearchService _search;
     private readonly IGenerationService _generation;
+    private readonly IBillLinker _billLinker;
+    private readonly ICitationPreviewer _citations;
     private readonly RagOptions _options;
 
     public RagService(
         IEmbeddingService embeddings,
         ISearchService search,
         IGenerationService generation,
+        IBillLinker billLinker,
+        ICitationPreviewer citations,
         IOptions<RagOptions> options)
     {
         _embeddings = embeddings;
         _search = search;
         _generation = generation;
+        _billLinker = billLinker;
+        _citations = citations;
         _options = options.Value;
     }
 
     public async Task<GenerationResult> GenerateWorkProductAsync(
-        WorkProductType workProduct, string? sourceFile, IProgress<string>? progress = null, CancellationToken ct = default)
+        WorkProductType workProduct, string? sourceFile, GenerationOptions? options = null, IProgress<string>? progress = null, CancellationToken ct = default)
     {
         var template = PromptLibrary.Get(workProduct);
+        var style = PromptLibrary.StyleDirective(options ?? GenerationOptions.Default);
 
         // Single meeting: generate directly from its full text.
         if (!string.IsNullOrWhiteSpace(sourceFile))
@@ -54,12 +61,13 @@ public sealed class RagService : IRagService
             if (chunks.Count == 0) return NoDocumentsResult(workProduct);
 
             progress?.Report($"Generating {template.DisplayName} from {chunks[0].Title}\u2026");
-            var content = await GenerateFromChunksAsync(template, chunks, ct);
+            var result = await GenerateFromChunksAsync(template, chunks, style, ct);
             return new GenerationResult
             {
-                Content = content,
+                Content = _citations.AddPreviews(_billLinker.AddLinks(result.Text, chunks), chunks),
                 WorkProduct = workProduct,
-                Sources = DistinctDocuments(chunks)
+                Sources = DistinctDocuments(chunks),
+                Usage = result.Usage
             };
         }
 
@@ -71,12 +79,13 @@ public sealed class RagService : IRagService
         {
             var chunks = await _search.GetChunksAsync(documents[0].SourceFile, ct);
             progress?.Report($"Generating {template.DisplayName} from {chunks[0].Title}\u2026");
-            var content = await GenerateFromChunksAsync(template, chunks, ct);
+            var result = await GenerateFromChunksAsync(template, chunks, style, ct);
             return new GenerationResult
             {
-                Content = content,
+                Content = _citations.AddPreviews(_billLinker.AddLinks(result.Text, chunks), chunks),
                 WorkProduct = workProduct,
-                Sources = DistinctDocuments(chunks)
+                Sources = DistinctDocuments(chunks),
+                Usage = result.Usage
             };
         }
 
@@ -86,32 +95,41 @@ public sealed class RagService : IRagService
         var mapTasks = documents.Select(async doc =>
         {
             var chunks = await _search.GetChunksAsync(doc.SourceFile, ct);
-            var draft = await GenerateFromChunksAsync(template, chunks, ct);
+            var draft = await GenerateFromChunksAsync(template, chunks, style, ct);
             var done = Interlocked.Increment(ref completed);
             progress?.Report($"Summarized {done} of {documents.Count} meetings\u2026");
-            return (doc.Title, draft);
+            return (doc.Title, draft, chunks);
         });
         var partials = (await Task.WhenAll(mapTasks)).ToList();
+        var usage = partials.Aggregate(TokenUsage.Zero, (acc, p) => acc + p.draft.Usage);
 
         // REDUCE: consolidate the per-meeting drafts into one final work product.
         progress?.Report($"Combining into final {template.DisplayName}\u2026");
-        var reducePrompt = PromptLibrary.BuildReduceUserPrompt(template, partials);
-        var finalContent = await _generation.CompleteAsync(template.SystemPrompt, reducePrompt, ct);
+        var reducePrompt = PromptLibrary.BuildReduceUserPrompt(
+            template, partials.Select(p => (p.Title, p.draft.Text)).ToList());
+        var final = await _generation.CompleteAsync(template.SystemPrompt + style, reducePrompt, ct);
+        usage += final.Usage;
+
+        // Link bill references in the consolidated output, grounded against every meeting's chunks.
+        var groundingChunks = partials.SelectMany(p => p.chunks).ToList();
 
         return new GenerationResult
         {
-            Content = finalContent,
+            Content = _citations.AddPreviews(_billLinker.AddLinks(final.Text, groundingChunks), groundingChunks),
             WorkProduct = workProduct,
-            Sources = documents.Select(DocumentToSource).ToList()
+            Sources = documents.Select(DocumentToSource).ToList(),
+            Usage = usage
         };
     }
 
-    private Task<string> GenerateFromChunksAsync(
-        PromptTemplate template, IReadOnlyList<RetrievedChunk> chunks, CancellationToken ct)
+    private Task<CompletionResult> GenerateFromChunksAsync(
+        PromptTemplate template, IReadOnlyList<RetrievedChunk> chunks, string styleDirective, CancellationToken ct)
     {
         var context = BuildContext(chunks);
         var request = $"Produce a {template.DisplayName} based on the following meeting: {chunks[0].Title}.";
-        return _generation.CompleteAsync(template, request, context, ct);
+        // Append style adjustments to the system prompt so tone/length can vary without touching the contract.
+        return _generation.CompleteAsync(
+            template.SystemPrompt + styleDirective, template.BuildUserPrompt(request, context), ct);
     }
 
     private static GenerationResult NoDocumentsResult(WorkProductType workProduct) => new()
@@ -172,12 +190,14 @@ public sealed class RagService : IRagService
         }
 
         var context = BuildContext(passages);
-        var content = await _generation.CompleteAsync(
+        var result = await _generation.CompleteAsync(
             PromptLibrary.DocumentChatSystemPrompt,
             PromptLibrary.BuildChatUserPrompt(question, context),
             ct);
 
-        return new ChatAnswer { Content = content, Sources = sources };
+        // Link grounded congressional bill references (e.g. "S. 3018") to congress.gov.
+        var linked = _billLinker.AddLinks(result.Text, passages);
+        return new ChatAnswer { Content = linked, Sources = sources };
     }
 
     /// <summary>Formats chunks into a labeled, citeable context block.</summary>

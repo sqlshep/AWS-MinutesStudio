@@ -7,6 +7,9 @@ public sealed class GenerationResult
     public required WorkProductType WorkProduct { get; init; }
     public required IReadOnlyList<RetrievedChunk> Sources { get; init; }
 
+    /// <summary>Total tokens consumed generating this work product (summed across map-reduce calls).</summary>
+    public TokenUsage Usage { get; init; } = TokenUsage.Zero;
+
     /// <summary>Set when generation could not be completed (e.g. no relevant sources found).</summary>
     public string? Warning { get; init; }
 }

@@ -15,6 +15,9 @@ public interface IBlobDocumentSource : IDocumentSource
 
     /// <summary>Uploads a single PDF (e.g. picked from the user's machine) into the container.</summary>
     Task UploadAsync(string fileName, Stream content, CancellationToken ct = default);
+
+    /// <summary>Downloads a blob's bytes as a seekable stream (used for inline preview).</summary>
+    Task<Stream> DownloadAsync(string fileName, CancellationToken ct = default);
 }
 
 public sealed class BlobDocumentSource : IBlobDocumentSource
@@ -77,5 +80,11 @@ public sealed class BlobDocumentSource : IBlobDocumentSource
     {
         await _container.CreateIfNotExistsAsync(cancellationToken: ct);
         await _container.GetBlobClient(Path.GetFileName(fileName)).UploadAsync(content, overwrite: true, ct);
+    }
+
+    public async Task<Stream> DownloadAsync(string fileName, CancellationToken ct = default)
+    {
+        var response = await _container.GetBlobClient(fileName).DownloadContentAsync(ct);
+        return response.Value.Content.ToStream();
     }
 }

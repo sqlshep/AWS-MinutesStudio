@@ -1,0 +1,61 @@
+@page "/architecture"
+@rendermode InteractiveServer
+@inject IJSRuntime JS
+@inject ILogger<Architecture> Logger
+
+<PageTitle>Team B Studio — Architecture</PageTitle>
+
+<div class="studio">
+    <header class="studio-header">
+        <h1>Data Architecture</h1>
+        <p class="subtitle">How documents flow through the system and the services involved.</p>
+    </header>
+
+    @if (_error is not null)
+    {
+        <div class="alert alert-error">@_error</div>
+    }
+    else if (_html is null)
+    {
+        <div class="prompt-box"><span class="spinner spinner-dark"></span> Loading…</div>
+    }
+    else
+    {
+        <article class="doc-content">@_html</article>
+    }
+</div>
+
+@code {
+    private MarkupString? _html;
+    private string? _error;
+
+    protected override void OnInitialized()
+    {
+        try
+        {
+            var path = Path.Combine(AppContext.BaseDirectory, "Content", "data-architecture.md");
+            var markdown = File.ReadAllText(path);
+            _html = MarkdownHelper.ToHtmlWithDiagrams(markdown);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to load architecture doc.");
+            _error = "Could not load the architecture document.";
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_html is not null)
+        {
+            try
+            {
+                await JS.InvokeVoidAsync("renderMermaid");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "Mermaid render call failed.");
+            }
+        }
+    }
+}

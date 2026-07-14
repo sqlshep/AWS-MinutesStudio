@@ -191,6 +191,42 @@ public static class PromptLibrary
     public static PromptTemplate Get(WorkProductType type) => Templates[type];
 
     /// <summary>
+    /// Builds an optional "style adjustments" block to append to a template's system prompt.
+    /// Adjusts tone/length only; explicitly reaffirms that sections, facts, figures, and citations
+    /// are never dropped or altered. Returns an empty string when all options are at their defaults.
+    /// </summary>
+    public static string StyleDirective(GenerationOptions options)
+    {
+        var lines = new List<string>();
+
+        switch (options.Length)
+        {
+            case WorkProductLength.Brief:
+                lines.Add("- Length: Be especially concise — keep only the most essential points and keep every section short.");
+                break;
+            case WorkProductLength.Detailed:
+                lines.Add("- Length: Be more thorough — expand each section with additional supporting detail, drawn strictly from the sources.");
+                break;
+        }
+
+        switch (options.Tone)
+        {
+            case WorkProductTone.Formal:
+                lines.Add("- Tone: Use a more formal, official register.");
+                break;
+            case WorkProductTone.Conversational:
+                lines.Add("- Tone: Adopt a slightly warmer, more conversational register while remaining professional and neutral.");
+                break;
+        }
+
+        if (lines.Count == 0) return string.Empty;
+
+        return "\n\nSTYLE ADJUSTMENTS (apply within the output contract above; do not drop required "
+            + "sections or change any facts, figures, or citations):\n"
+            + string.Join("\n", lines);
+    }
+
+    /// <summary>
     /// System prompt for free-form document chat. Reuses the shared grounding rules so
     /// conversational answers stay as auditable as the structured work products.
     /// </summary>
