@@ -18,7 +18,7 @@ public interface ICitationPreviewer
 
 public sealed partial class CitationPreviewer : ICitationPreviewer
 {
-    private const int MaxSnippet = 300;
+    private const int MaxSnippet = 1200;
 
     private static readonly HashSet<string> StopWords = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -44,16 +44,46 @@ public sealed partial class CitationPreviewer : ICitationPreviewer
 
         return CitationRegex().Replace(content, match =>
         {
-            var title = Normalize(match.Groups[1].Value);
-            if (!byTitle.TryGetValue(title, out var sourceText)) return match.Value;
+            var title = ResolveTitle(match.Groups[1].Value, byTitle);
+            if (title is null || !byTitle.TryGetValue(title, out var sourceText)) return match.Value;
 
             var claim = PrecedingClaim(content, match.Index);
             var snippet = BestSnippet(sourceText, claim);
             if (string.IsNullOrEmpty(snippet)) return match.Value;
 
             var encoded = WebUtility.HtmlEncode(snippet);
-            return $"<span class=\"cite\" tabindex=\"0\" data-preview=\"{encoded}\">{match.Value}</span>";
+            var label = WebUtility.HtmlEncode(match.Value);
+            return $"<span class=\"cite\" role=\"button\" tabindex=\"0\" data-cite=\"{label}\" data-preview=\"{encoded}\">{match.Value}</span>";
         });
+    }
+
+    private static readonly HashSet<string> CitationLabels = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "sourcing", "source", "sources", "see", "ref", "refs", "reference", "references", "cite", "citation"
+    };
+
+    /// <summary>
+    /// Maps the text inside a "[...]" citation to a known meeting title. Handles the standard
+    /// "[Meeting — Date]" form as well as labeled variants like "[Sourcing: Meeting — Date]"
+    /// (used by Executive Talking Points), and falls back to a contained-title match.
+    /// </summary>
+    private static string? ResolveTitle(string inner, IReadOnlyDictionary<string, string> byTitle)
+    {
+        var normalized = Normalize(inner);
+        if (byTitle.ContainsKey(normalized)) return normalized;
+
+        // Strip a leading label like "Sourcing:" / "Source:" / "See:" and retry.
+        var colon = normalized.IndexOf(':');
+        if (colon > 0 && CitationLabels.Contains(normalized[..colon].Trim()))
+        {
+            var candidate = normalized[(colon + 1)..].Trim();
+            if (byTitle.ContainsKey(candidate)) return candidate;
+            normalized = candidate;
+        }
+
+        // Fallback: a known meeting title contained within the citation text.
+        return byTitle.Keys.FirstOrDefault(
+            key => normalized.Contains(key, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>The ~220 chars of answer text before the citation, tags stripped — used as the query.</summary>
@@ -90,14 +120,23 @@ public sealed partial class CitationPreviewer : ICitationPreviewer
             }
         }
 
-        // No keyword overlap (e.g. a generic claim): fall back to the meeting's opening line.
-        var snippet = segments[bestIndex];
-        if (snippet.Length < 120 && bestIndex + 1 < segments.Count)
-            snippet = snippet + " " + segments[bestIndex + 1];
+        // Build a roomy excerpt for the side panel: start one segment early for lead-in context,
+        // then extend forward until we approach the length budget.
+        var startIndex = bestIndex > 0 ? bestIndex - 1 : 0;
+        var sb = new StringBuilder();
+        var lastIndex = startIndex;
+        for (var i = startIndex; i < segments.Count; i++)
+        {
+            if (sb.Length > 0) sb.Append(' ');
+            sb.Append(segments[i]);
+            lastIndex = i;
+            if (sb.Length >= MaxSnippet) break;
+        }
 
-        snippet = WhitespaceRegex().Replace(snippet, " ").Trim();
+        var snippet = WhitespaceRegex().Replace(sb.ToString(), " ").Trim();
         if (snippet.Length > MaxSnippet) snippet = snippet[..MaxSnippet].TrimEnd() + "\u2026";
-        if (bestIndex > 0) snippet = "\u2026" + snippet;
+        else if (lastIndex < segments.Count - 1) snippet += "\u2026";
+        if (startIndex > 0) snippet = "\u2026" + snippet;
         return snippet;
     }
 

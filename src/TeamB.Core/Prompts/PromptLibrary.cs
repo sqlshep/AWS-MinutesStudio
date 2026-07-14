@@ -23,7 +23,12 @@ namespace TeamB.Core.Prompts;
 /// </summary>
 public static class PromptLibrary
 {
-    private const string GroundingRules =
+    /// <summary>
+    /// The shared, non-negotiable grounding rules injected into every template's system prompt.
+    /// Exposed so the Prompt Library page can display them once at the top rather than repeating
+    /// them inside each prompt.
+    /// </summary>
+    public const string GroundingRules =
         """
         GROUNDING RULES (non-negotiable):
         - Use ONLY the SOURCE MATERIAL provided below. Do not add outside knowledge, context, or assumptions.
@@ -225,6 +230,17 @@ public static class PromptLibrary
             + "sections or change any facts, figures, or citations):\n"
             + string.Join("\n", lines);
     }
+
+    /// <summary>
+    /// Optional directive appended when the caller wants a reference-free draft (Hidden or Clean):
+    /// suppresses the inline "[Meeting — Date]" citations and the Sources section. Facts and figures
+    /// are unchanged; only the source-attribution markers are omitted. Empty when references are Included.
+    /// </summary>
+    public static string ReferenceDirective(ReferenceMode mode) => mode == ReferenceMode.Included
+        ? string.Empty
+        : "\n\nREFERENCES: Produce a clean draft WITHOUT source attribution. Do NOT include any inline "
+        + "citations (e.g. \"[Business Meeting — April 15, 2026]\") and OMIT the \"## Sources\" section "
+        + "entirely. Keep all facts, figures, and vote tallies exactly as grounded in the source material.";
 
     /// <summary>
     /// System prompt for free-form document chat. Reuses the shared grounding rules so

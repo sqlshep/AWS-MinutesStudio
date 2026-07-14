@@ -66,6 +66,16 @@
                     }
                 </div>
             </div>
+            <div class="style-group">
+                <span class="picker-label">References</span>
+                <div class="seg">
+                    @foreach (var r in RefModes)
+                    {
+                        <button type="button" class="seg-btn @(_referenceMode == r ? "selected" : "")"
+                                @onclick="() => _referenceMode = r" disabled="@_busy" title="@RefTitle(r)">@RefLabel(r)</button>
+                    }
+                </div>
+            </div>
         </section>
 
         <section class="format-picker">
@@ -135,7 +145,7 @@
                 </div>
             </section>
 
-            @if (_result.Sources.Count > 0)
+            @if (_referencesShown && _result.Sources.Count > 0)
             {
                 <section class="sources">
                     <h3>Grounded in @_result.Sources.Count document(s)</h3>
@@ -151,10 +161,21 @@
     }
 </div>
 
+<ReferencePanel />
+
 @code {
     private static readonly WorkProductLength[] Lengths = Enum.GetValues<WorkProductLength>();
     private static readonly WorkProductTone[] Tones = Enum.GetValues<WorkProductTone>();
+    private static readonly ReferenceMode[] RefModes = Enum.GetValues<ReferenceMode>();
     private static string ToneLabel(WorkProductTone tone) => tone == WorkProductTone.Default ? "Neutral" : tone.ToString();
+    private static string RefLabel(ReferenceMode r) => r == ReferenceMode.Clean ? "Clean" : r.ToString();
+    private static string RefTitle(ReferenceMode r) => r switch
+    {
+        ReferenceMode.Included => "Inline clickable citations plus a Sources list.",
+        ReferenceMode.Hidden => "Ask the model to leave citations and the Sources section out.",
+        ReferenceMode.Clean => "Strip every citation marker after generation — safe to copy or email.",
+        _ => string.Empty
+    };
 
     private IReadOnlyList<DocumentInfo>? _documents;
     private string? _selectedSource;
@@ -163,6 +184,8 @@
     private WorkProductType? _lastType;
     private WorkProductLength _length = WorkProductLength.Standard;
     private WorkProductTone _tone = WorkProductTone.Default;
+    private ReferenceMode _referenceMode = ReferenceMode.Included;
+    private bool _referencesShown = true;
     private string? _error;
     private string? _status;
     private string _scopeLabel = string.Empty;
@@ -218,7 +241,8 @@
 
         try
         {
-            var options = new GenerationOptions(_length, _tone);
+            var options = new GenerationOptions(_length, _tone, _referenceMode);
+            _referencesShown = _referenceMode == ReferenceMode.Included;
             _result = await RagService.GenerateWorkProductAsync(type, _selectedSource, options, progress);
         }
         catch (Exception ex)

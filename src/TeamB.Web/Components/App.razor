@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <base href="/" />
     <link rel="stylesheet" href="bootstrap/bootstrap.min.css" />
-    <link rel="stylesheet" href="app.css?v=2" />
+    <link rel="stylesheet" href="app.css?v=6" />
     <link rel="stylesheet" href="TeamB.Web.styles.css" />
     <link rel="icon" type="image/png" href="favicon.png" />
     <HeadOutlet />
@@ -19,6 +19,25 @@
         window.copyToClipboard = async (text) => {
             try { await navigator.clipboard.writeText(text); return true; }
             catch (e) { console.error('Clipboard write failed', e); return false; }
+        };
+    </script>
+    <script>
+        // Delegated click handler for citation references. Bound once; the active Blazor
+        // component swaps its DotNetObjectReference in on navigation. Clicking a "[Meeting — Date]"
+        // citation opens the reference panel with that source's excerpt.
+        window.registerCitationPanel = (dotnet) => {
+            window.__citePanel = window.__citePanel || {};
+            window.__citePanel.dotnet = dotnet;
+            if (window.__citePanel.bound) return;
+            window.__citePanel.bound = true;
+            document.addEventListener('click', (e) => {
+                const cite = e.target.closest('.cite');
+                if (!cite || !window.__citePanel.dotnet) return;
+                window.__citePanel.dotnet.invokeMethodAsync(
+                    'ShowReference',
+                    cite.getAttribute('data-cite') ?? '',
+                    cite.getAttribute('data-preview') ?? '');
+            });
         };
     </script>
     <script>

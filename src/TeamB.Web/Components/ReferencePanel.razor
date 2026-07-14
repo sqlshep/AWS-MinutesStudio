@@ -1,0 +1,51 @@
+@implements IDisposable
+@inject IJSRuntime JS
+
+<aside class="ref-panel @(_open ? "open" : "")" aria-hidden="@((!_open).ToString().ToLowerInvariant())">
+    <header class="ref-head">
+        <span class="ref-title">@(string.IsNullOrWhiteSpace(_title) ? "Source excerpt" : _title)</span>
+        <button type="button" class="ref-close" @onclick="Close" aria-label="Close reference panel">&times;</button>
+    </header>
+    <div class="ref-body">
+        @if (string.IsNullOrWhiteSpace(_text))
+        {
+            <p class="ref-empty">No excerpt available for this reference.</p>
+        }
+        else
+        {
+            <p>@_text</p>
+        }
+    </div>
+</aside>
+
+@if (_open)
+{
+    <div class="ref-scrim" @onclick="Close"></div>
+}
+
+@code {
+    private DotNetObjectReference<ReferencePanel>? _ref;
+    private bool _open;
+    private string? _title;
+    private string? _text;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        _ref = DotNetObjectReference.Create(this);
+        await JS.InvokeVoidAsync("registerCitationPanel", _ref);
+    }
+
+    [JSInvokable]
+    public Task ShowReference(string title, string text)
+    {
+        _title = title;
+        _text = text;
+        _open = true;
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private void Close() => _open = false;
+
+    public void Dispose() => _ref?.Dispose();
+}

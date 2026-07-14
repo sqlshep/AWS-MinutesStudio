@@ -23,7 +23,7 @@ public interface IRagService
     Task<ChatAnswer> AskAsync(string question, string? sourceFile = null, CancellationToken ct = default);
 }
 
-public sealed class RagService : IRagService
+public sealed partial class RagService : IRagService
 {
     private readonly IEmbeddingService _embeddings;
     private readonly ISearchService _search;
@@ -51,8 +51,9 @@ public sealed class RagService : IRagService
     public async Task<GenerationResult> GenerateWorkProductAsync(
         WorkProductType workProduct, string? sourceFile, GenerationOptions? options = null, IProgress<string>? progress = null, CancellationToken ct = default)
     {
+        var opts = options ?? GenerationOptions.Default;
         var template = PromptLibrary.Get(workProduct);
-        var style = PromptLibrary.StyleDirective(options ?? GenerationOptions.Default);
+        var style = PromptLibrary.StyleDirective(opts) + PromptLibrary.ReferenceDirective(opts.References);
 
         // Single meeting: generate directly from its full text.
         if (!string.IsNullOrWhiteSpace(sourceFile))
@@ -64,7 +65,7 @@ public sealed class RagService : IRagService
             var result = await GenerateFromChunksAsync(template, chunks, style, ct);
             return new GenerationResult
             {
-                Content = _citations.AddPreviews(_billLinker.AddLinks(result.Text, chunks), chunks),
+                Content = Finalize(result.Text, chunks, opts.References),
                 WorkProduct = workProduct,
                 Sources = DistinctDocuments(chunks),
                 Usage = result.Usage
@@ -82,7 +83,7 @@ public sealed class RagService : IRagService
             var result = await GenerateFromChunksAsync(template, chunks, style, ct);
             return new GenerationResult
             {
-                Content = _citations.AddPreviews(_billLinker.AddLinks(result.Text, chunks), chunks),
+                Content = Finalize(result.Text, chunks, opts.References),
                 WorkProduct = workProduct,
                 Sources = DistinctDocuments(chunks),
                 Usage = result.Usage
@@ -115,12 +116,53 @@ public sealed class RagService : IRagService
 
         return new GenerationResult
         {
-            Content = _citations.AddPreviews(_billLinker.AddLinks(final.Text, groundingChunks), groundingChunks),
+            Content = Finalize(final.Text, groundingChunks, opts.References),
             WorkProduct = workProduct,
             Sources = documents.Select(DocumentToSource).ToList(),
             Usage = usage
         };
     }
+
+    /// <summary>
+    /// Post-processes generated text: always links grounded congressional bill references, then
+    /// applies the reference mode — clickable citation excerpts (Included), leave as-is (Hidden),
+    /// or strip every residual citation marker for a guaranteed reference-free draft (Clean).
+    /// </summary>
+    private string Finalize(string text, IReadOnlyList<RetrievedChunk> chunks, ReferenceMode mode)
+    {
+        var linked = _billLinker.AddLinks(text, chunks);
+        return mode switch
+        {
+            ReferenceMode.Included => _citations.AddPreviews(linked, chunks),
+            ReferenceMode.Clean => StripCitations(linked),
+            _ => linked
+        };
+    }
+
+    /// <summary>
+    /// Removes "[…]" citation markers (including labeled "[Sourcing: …]" forms) and tidies the
+    /// leftover spacing, so a Clean-mode draft carries no reference to the source documents.
+    /// </summary>
+    private static string StripCitations(string text)
+    {
+        var stripped = CitationBracketRegex().Replace(text, string.Empty);
+        stripped = SpaceBeforePunctuationRegex().Replace(stripped, "$1");
+        stripped = RepeatedSpaceRegex().Replace(stripped, " ");
+        stripped = TrailingSpaceRegex().Replace(stripped, "\n");
+        return stripped.Trim();
+    }
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"\s*\[[^\[\]\n]{4,160}\]")]
+    private static partial System.Text.RegularExpressions.Regex CitationBracketRegex();
+
+    [System.Text.RegularExpressions.GeneratedRegex(@" +([.,;:!?])")]
+    private static partial System.Text.RegularExpressions.Regex SpaceBeforePunctuationRegex();
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"[ \t]{2,}")]
+    private static partial System.Text.RegularExpressions.Regex RepeatedSpaceRegex();
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"[ \t]+\n")]
+    private static partial System.Text.RegularExpressions.Regex TrailingSpaceRegex();
 
     private Task<CompletionResult> GenerateFromChunksAsync(
         PromptTemplate template, IReadOnlyList<RetrievedChunk> chunks, string styleDirective, CancellationToken ct)
@@ -195,9 +237,11 @@ public sealed class RagService : IRagService
             PromptLibrary.BuildChatUserPrompt(question, context),
             ct);
 
-        // Link grounded congressional bill references (e.g. "S. 3018") to congress.gov.
+        // Link grounded congressional bill references (e.g. "S. 3018") to congress.gov, then attach
+        // clickable source excerpts to each citation so the reference panel works in chat too.
         var linked = _billLinker.AddLinks(result.Text, passages);
-        return new ChatAnswer { Content = linked, Sources = sources };
+        var withPreviews = _citations.AddPreviews(linked, passages);
+        return new ChatAnswer { Content = withPreviews, Sources = sources };
     }
 
     /// <summary>Formats chunks into a labeled, citeable context block.</summary>

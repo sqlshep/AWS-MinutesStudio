@@ -11,6 +11,15 @@
         </p>
     </header>
 
+    <section class="prompt-doc grounding-rules">
+        <h2>Grounding rules</h2>
+        <p class="prompt-desc">
+            These non-negotiable rules are injected into every prompt below (and the chat assistant).
+            They are what keep every answer traceable to the source minutes and free of fabrication.
+        </p>
+        <pre class="prompt-source">@PromptLibrary.GroundingRules</pre>
+    </section>
+
     @foreach (var t in PromptLibrary.All)
     {
         <section class="prompt-doc">

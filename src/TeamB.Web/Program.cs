@@ -78,14 +78,15 @@ app.MapGet("/api/blob/preview", async (string name, IBlobDocumentSource blob, Ca
     }
 });
 
-app.MapGet("/api/workproduct", async (string type, string? sourceFile, string? tone, string? length, IRagService rag, CancellationToken ct) =>
+app.MapGet("/api/workproduct", async (string type, string? sourceFile, string? tone, string? length, string? references, IRagService rag, CancellationToken ct) =>
 {
     if (!Enum.TryParse<WorkProductType>(type, ignoreCase: true, out var workProduct))
         return Results.BadRequest($"Unknown work product '{type}'. Valid: {string.Join(", ", Enum.GetNames<WorkProductType>())}.");
 
     var options = new GenerationOptions(
         Enum.TryParse<WorkProductLength>(length, ignoreCase: true, out var l) ? l : WorkProductLength.Standard,
-        Enum.TryParse<WorkProductTone>(tone, ignoreCase: true, out var t) ? t : WorkProductTone.Default);
+        Enum.TryParse<WorkProductTone>(tone, ignoreCase: true, out var t) ? t : WorkProductTone.Default,
+        Enum.TryParse<ReferenceMode>(references, ignoreCase: true, out var r) ? r : ReferenceMode.Included);
 
     return Results.Ok(await rag.GenerateWorkProductAsync(workProduct, sourceFile, options, progress: null, ct));
 });
