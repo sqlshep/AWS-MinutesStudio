@@ -1,0 +1,36 @@
+@page "/prompts"
+
+<PageTitle>Minutes Studio — Prompt Library</PageTitle>
+
+<div class="studio">
+    <header class="studio-header">
+        <h1>Prompt Library</h1>
+        <p class="subtitle">
+            Four grounded, production-ready prompt templates for the most common Minutes Studio work products.
+            Each is annotated with the key design decisions behind it.
+        </p>
+    </header>
+
+    <section class="prompt-doc grounding-rules">
+        <h2>Grounding rules</h2>
+        <p class="prompt-desc">
+            These non-negotiable rules are injected into every prompt below (and the chat assistant).
+            They are what keep every answer traceable to the source minutes and free of fabrication.
+        </p>
+        <pre class="prompt-source">@PromptLibrary.GroundingRules</pre>
+    </section>
+
+    @foreach (var t in PromptLibrary.All)
+    {
+        <section class="prompt-doc">
+            <h2>@t.DisplayName</h2>
+            <p class="prompt-desc">@t.Description</p>
+
+            <h4>Design notes</h4>
+            <p class="design-notes">@t.DesignNotes</p>
+
+            <h4>System prompt</h4>
+            <pre class="prompt-source">@t.SystemPrompt</pre>
+        </section>
+    }
+</div>

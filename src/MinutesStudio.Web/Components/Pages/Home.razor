@@ -1,0 +1,262 @@
+﻿@page "/"
+@rendermode InteractiveServer
+@inject IRagService RagService
+@inject ISearchService SearchService
+@inject IJSRuntime JS
+@inject ILogger<Home> Logger
+
+<PageTitle>Minutes Studio — Work Products</PageTitle>
+
+<div class="studio">
+    <header class="studio-header">
+        <h1>Work Product Generator</h1>
+        <p class="subtitle">
+            Pick a meeting (or all of them), then click a format. The draft is generated straight
+            from the source minutes and cited back to them — no prompt-writing required.
+        </p>
+    </header>
+
+    @if (_documents is null)
+    {
+        <div class="prompt-box"><span class="spinner spinner-dark"></span> Loading documents…</div>
+    }
+    else if (_documents.Count == 0)
+    {
+        <div class="alert alert-warn">
+            No documents are indexed yet. Go to <a href="ingest">Documents</a> and ingest the meeting minutes first.
+        </div>
+    }
+    else
+    {
+        <section class="doc-picker">
+            <span class="picker-label">Source</span>
+            <div class="pill-row">
+                <button type="button" class="pill @(_selectedSource is null ? "selected" : "")"
+                        @onclick="() => SelectSource(null)" disabled="@_busy">
+                    All meetings
+                </button>
+                @foreach (var doc in _documents)
+                {
+                    <button type="button" class="pill @(_selectedSource == doc.SourceFile ? "selected" : "")"
+                            @onclick="() => SelectSource(doc.SourceFile)" disabled="@_busy">
+                        @doc.Title
+                    </button>
+                }
+            </div>
+        </section>
+
+        <section class="style-controls">
+            <div class="style-group">
+                <span class="picker-label">Length</span>
+                <div class="seg">
+                    @foreach (var l in Lengths)
+                    {
+                        <button type="button" class="seg-btn @(_length == l ? "selected" : "")"
+                                @onclick="() => _length = l" disabled="@_busy">@l.ToString()</button>
+                    }
+                </div>
+            </div>
+            <div class="style-group">
+                <span class="picker-label">Tone</span>
+                <div class="seg">
+                    @foreach (var t in Tones)
+                    {
+                        <button type="button" class="seg-btn @(_tone == t ? "selected" : "")"
+                                @onclick="() => _tone = t" disabled="@_busy">@ToneLabel(t)</button>
+                    }
+                </div>
+            </div>
+            <div class="style-group">
+                <span class="picker-label">References</span>
+                <div class="seg">
+                    @foreach (var r in RefModes)
+                    {
+                        <button type="button" class="seg-btn @(_referenceMode == r ? "selected" : "")"
+                                @onclick="() => _referenceMode = r" disabled="@_busy" title="@RefTitle(r)">@RefLabel(r)</button>
+                    }
+                </div>
+            </div>
+        </section>
+
+        <section class="format-picker">
+            @foreach (var template in PromptLibrary.All)
+            {
+                <button type="button" class="format-card"
+                        @onclick="() => Generate(template.WorkProduct)" disabled="@_busy">
+                    <span class="format-name">
+                        @template.DisplayName
+                        @if (_busyType == template.WorkProduct)
+                        {
+                            <span class="spinner spinner-dark"></span>
+                        }
+                    </span>
+                    <span class="format-desc">@template.Description</span>
+                </button>
+            }
+        </section>
+
+        @if (_busy && _status is not null)
+        {
+            <div class="gen-status"><span class="spinner spinner-dark"></span> @_status</div>
+        }
+    }
+
+    @if (_error is not null)
+    {
+        <div class="alert alert-error">@_error</div>
+    }
+
+    @if (_result is not null)
+    {
+        @if (_result.Warning is not null)
+        {
+            <div class="alert alert-warn">@_result.Warning</div>
+        }
+
+        @if (!string.IsNullOrWhiteSpace(_result.Content))
+        {
+            <section class="output">
+                <div class="output-header">
+                    <h2>@PromptLibrary.Get(_result.WorkProduct).DisplayName</h2>
+                    <div class="output-meta">
+                        <span class="output-scope">@_scopeLabel</span>
+                        @if (_result.Usage.TotalTokens > 0)
+                        {
+                            <span class="token-badge"
+                                  title="@($"{_result.Usage.TotalTokens:N0} total tokens")">
+                                @_result.Usage.InputTokens.ToString("N0") in / @_result.Usage.OutputTokens.ToString("N0") out
+                            </span>
+                        }
+                    </div>
+                </div>
+                <article class="output-body">
+                    @MarkdownHelper.ToHtml(_result.Content)
+                </article>
+                <div class="output-footer">
+                    <button class="btn-secondary" @onclick="CopyOutput">
+                        @(_copied ? "Copied!" : "Copy text")
+                    </button>
+                    @if (_lastType is not null)
+                    {
+                        <button class="btn-secondary" @onclick="Regenerate" disabled="@_busy">
+                            Regenerate
+                        </button>
+                    }
+                </div>
+            </section>
+
+            @if (_referencesShown && _result.Sources.Count > 0)
+            {
+                <section class="sources">
+                    <h3>Grounded in @_result.Sources.Count document(s)</h3>
+                    <ul>
+                        @foreach (var s in _result.Sources)
+                        {
+                            <li><span class="src-title">@s.Title</span> <span class="src-meta">@s.SourceFile</span></li>
+                        }
+                    </ul>
+                </section>
+            }
+        }
+    }
+</div>
+
+<ReferencePanel />
+
+@code {
+    private static readonly WorkProductLength[] Lengths = Enum.GetValues<WorkProductLength>();
+    private static readonly WorkProductTone[] Tones = Enum.GetValues<WorkProductTone>();
+    private static readonly ReferenceMode[] RefModes = Enum.GetValues<ReferenceMode>();
+    private static string ToneLabel(WorkProductTone tone) => tone == WorkProductTone.Default ? "Neutral" : tone.ToString();
+    private static string RefLabel(ReferenceMode r) => r == ReferenceMode.Clean ? "Clean" : r.ToString();
+    private static string RefTitle(ReferenceMode r) => r switch
+    {
+        ReferenceMode.Included => "Inline clickable citations plus a Sources list.",
+        ReferenceMode.Hidden => "Ask the model to leave citations and the Sources section out.",
+        ReferenceMode.Clean => "Strip every citation marker after generation — safe to copy or email.",
+        _ => string.Empty
+    };
+
+    private IReadOnlyList<DocumentInfo>? _documents;
+    private string? _selectedSource;
+    private bool _busy;
+    private WorkProductType? _busyType;
+    private WorkProductType? _lastType;
+    private WorkProductLength _length = WorkProductLength.Standard;
+    private WorkProductTone _tone = WorkProductTone.Default;
+    private ReferenceMode _referenceMode = ReferenceMode.Included;
+    private bool _referencesShown = true;
+    private string? _error;
+    private string? _status;
+    private string _scopeLabel = string.Empty;
+    private GenerationResult? _result;
+    private bool _copied;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _documents = await SearchService.ListDocumentsAsync();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to load documents.");
+            _documents = Array.Empty<DocumentInfo>();
+            _error = $"Could not load documents: {ex.Message}";
+        }
+    }
+
+    private void SelectSource(string? sourceFile) => _selectedSource = sourceFile;
+
+    private async Task CopyOutput()
+    {
+        if (_result is null || string.IsNullOrEmpty(_result.Content)) return;
+
+        var ok = await JS.InvokeAsync<bool>("copyRich",
+            MarkdownHelper.ToCopyHtml(_result.Content),
+            MarkdownHelper.ToCopyText(_result.Content));
+        if (!ok) return;
+
+        _copied = true;
+        StateHasChanged();
+        await Task.Delay(1800);
+        _copied = false;
+    }
+
+    private Task Regenerate() => _lastType is null ? Task.CompletedTask : Generate(_lastType.Value);
+
+    private async Task Generate(WorkProductType type)
+    {
+        _error = null;
+        _result = null;
+        _copied = false;
+        _busy = true;
+        _busyType = type;
+        _lastType = type;
+        _status = "Starting\u2026";
+        _scopeLabel = _selectedSource is null
+            ? "All meetings"
+            : _documents?.FirstOrDefault(d => d.SourceFile == _selectedSource)?.Title ?? "Selected meeting";
+
+        var progress = new Progress<string>(msg =>
+            _ = InvokeAsync(() => { _status = msg; StateHasChanged(); }));
+
+        try
+        {
+            var options = new GenerationOptions(_length, _tone, _referenceMode);
+            _referencesShown = _referenceMode == ReferenceMode.Included;
+            _result = await RagService.GenerateWorkProductAsync(type, _selectedSource, options, progress);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Work product generation failed.");
+            _error = $"Something went wrong: {ex.Message}";
+        }
+        finally
+        {
+            _busy = false;
+            _busyType = null;
+            _status = null;
+        }
+    }
+}

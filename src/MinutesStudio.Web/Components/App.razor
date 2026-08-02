@@ -1,0 +1,79 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <base href="/" />
+    <link rel="stylesheet" href="bootstrap/bootstrap.min.css" />
+    <link rel="stylesheet" href="app.css?v=6" />
+    <link rel="stylesheet" href="MinutesStudio.Web.styles.css" />
+    <link rel="icon" type="image/png" href="favicon.png" />
+    <HeadOutlet />
+</head>
+
+<body>
+    <Routes />
+    <script src="_framework/blazor.web.js"></script>
+    <script>
+        window.copyToClipboard = async (text) => {
+            try { await navigator.clipboard.writeText(text); return true; }
+            catch (e) { console.error('Clipboard write failed', e); return false; }
+        };
+        // Writes both a rich (text/html) and plain (text/plain) flavor so pasting into email or
+        // Word keeps headings/bold/bullets, while plain editors still get clean text.
+        window.copyRich = async (html, text) => {
+            try {
+                if (navigator.clipboard && window.ClipboardItem) {
+                    const item = new ClipboardItem({
+                        'text/html': new Blob([html], { type: 'text/html' }),
+                        'text/plain': new Blob([text], { type: 'text/plain' })
+                    });
+                    await navigator.clipboard.write([item]);
+                    return true;
+                }
+                await navigator.clipboard.writeText(text);
+                return true;
+            } catch (e) {
+                try { await navigator.clipboard.writeText(text); return true; }
+                catch (e2) { console.error('Rich copy failed', e2); return false; }
+            }
+        };
+    </script>
+    <script>
+        // Delegated click handler for citation references. Bound once; the active Blazor
+        // component swaps its DotNetObjectReference in on navigation. Clicking a "[Meeting — Date]"
+        // citation opens the reference panel with that source's excerpt.
+        window.registerCitationPanel = (dotnet) => {
+            window.__citePanel = window.__citePanel || {};
+            window.__citePanel.dotnet = dotnet;
+            if (window.__citePanel.bound) return;
+            window.__citePanel.bound = true;
+            document.addEventListener('click', (e) => {
+                const cite = e.target.closest('.cite');
+                if (!cite || !window.__citePanel.dotnet) return;
+                window.__citePanel.dotnet.invokeMethodAsync(
+                    'ShowReference',
+                    cite.getAttribute('data-cite') ?? '',
+                    cite.getAttribute('data-preview') ?? '');
+            });
+        };
+    </script>
+    <script>
+        // Lazily loads Mermaid from CDN and renders any <pre class="mermaid"> blocks on demand.
+        window.renderMermaid = async () => {
+            try {
+                if (!window.__mermaid) {
+                    const mod = await import('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs');
+                    window.__mermaid = mod.default;
+                    window.__mermaid.initialize({ startOnLoad: false, theme: 'neutral' });
+                }
+                await window.__mermaid.run({ querySelector: 'pre.mermaid' });
+            } catch (e) {
+                console.error('Mermaid render failed', e);
+            }
+        };
+    </script>
+</body>
+
+</html>

@@ -1,4 +1,4 @@
-# Team B Studio — Data Architecture
+# Minutes Studio — Data Architecture
 
 A prototype Retrieval-Augmented Generation (RAG) application that ingests meeting-minute PDFs and
 generates analyst **work products** (stakeholder briefs, executive talking points, plain-language
@@ -6,7 +6,7 @@ summaries, meeting summaries) plus free-form **document chat**, all grounded in 
 source documents.
 
 - **Frontend / host:** ASP.NET Core Blazor Web App (.NET 8, Interactive Server)
-- **RAG logic:** `TeamB.Core` class library
+- **RAG logic:** `MinutesStudio.Core` class library
 - **AI:** Azure OpenAI (Azure AI Foundry) — `gpt-5.4-mini` (chat) + `text-embedding-3-large` (embeddings)
 - **Vector store:** Azure AI Search (hybrid keyword + vector)
 - **Document store:** Azure Blob Storage (source PDFs)
@@ -19,11 +19,11 @@ source documents.
 
 | Service | Role | Notes |
 | --- | --- | --- |
-| **Azure Blob Storage** | Source of truth for the raw PDFs | Container `teamb-samples`; app can seed from local samples or accept uploads |
+| **Azure Blob Storage** | Source of truth for the raw PDFs | Container `minutesstudio-samples`; app can seed from local samples or accept uploads |
 | **Azure OpenAI (Foundry)** | Embeddings + text generation | `text-embedding-3-large` (3072-dim) and `gpt-5.4-mini`; API pinned to `2024-10-21` |
-| **Azure AI Search** | Vector + keyword index | Hybrid search (BM25 + HNSW vectors); index `teamb-minutes` |
+| **Azure AI Search** | Vector + keyword index | Hybrid search (BM25 + HNSW vectors); index `minutesstudio-minutes` |
 
-### Application services (`TeamB.Core`)
+### Application services (`MinutesStudio.Core`)
 
 | Service | Responsibility |
 | --- | --- |
@@ -39,7 +39,7 @@ source documents.
 | `AzureErrorHelper` | Maps SDK exceptions to actionable messages |
 | `Retry` | Exponential-backoff retry for transient (incl. intermittent 404) failures |
 
-### HTTP surface (`TeamB.Web`)
+### HTTP surface (`MinutesStudio.Web`)
 
 - **UI pages:** `/` (Work Products), `/chat` (Document Chat), `/ingest` (Documents & Indexing), `/prompts`
 - **JSON API:** `POST /api/ingest`, `POST /api/blob/upload-samples`, `GET /api/workproduct`, `GET /api/ask`, `GET /api/health`
@@ -61,7 +61,7 @@ flowchart LR
         SEARCH[(Azure AI Search<br/>hybrid index)]
     end
 
-    subgraph App[Blazor Web App + TeamB.Core]
+    subgraph App[Blazor Web App + MinutesStudio.Core]
         ING[IngestionService]
         RAG[RagService]
     end
@@ -168,7 +168,7 @@ Each indexed record is a **chunk** (`SearchIndexDocument`):
 | `sourceFile`, `title`, `meetingDate` | Document metadata / citations |
 | `chunkIndex`, `pageStart`, `pageEnd` | Ordering + page-range citations |
 
-The index (`teamb-minutes`) is created with an HNSW vector profile and supports **hybrid** queries —
+The index (`minutesstudio-minutes`) is created with an HNSW vector profile and supports **hybrid** queries —
 combining keyword and vector scoring, which is more robust than either alone for short analyst queries.
 
 ---
