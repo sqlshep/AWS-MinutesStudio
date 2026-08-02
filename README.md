@@ -218,3 +218,9 @@ the **Prompt Library** page. Each template is annotated with the key design deci
 
 Prototype built for evaluation. Not production-hardened — secrets are local user-secrets and the auth
 model is key-based pending the Entra/managed-identity work above.
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE).
