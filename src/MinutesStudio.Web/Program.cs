@@ -1,4 +1,4 @@
-using Azure.AI.OpenAI;
+using Amazon.BedrockRuntime;
 using Microsoft.Extensions.Options;
 using MinutesStudio.Core.Configuration;
 using MinutesStudio.Core.Models;
@@ -10,33 +10,33 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 
-// --- Configuration binding (AzureOpenAI, AzureSearch, AzureBlob, Rag) ---
-builder.Services.Configure<AzureOpenAIOptions>(builder.Configuration.GetSection(AzureOpenAIOptions.SectionName));
-builder.Services.Configure<AzureSearchOptions>(builder.Configuration.GetSection(AzureSearchOptions.SectionName));
-builder.Services.Configure<AzureBlobOptions>(builder.Configuration.GetSection(AzureBlobOptions.SectionName));
+// --- Configuration binding (Bedrock, OpenSearch, S3, Rag) ---
+builder.Services.Configure<BedrockOptions>(builder.Configuration.GetSection(BedrockOptions.SectionName));
+builder.Services.Configure<OpenSearchOptions>(builder.Configuration.GetSection(OpenSearchOptions.SectionName));
+builder.Services.Configure<S3Options>(builder.Configuration.GetSection(S3Options.SectionName));
 builder.Services.Configure<RagOptions>(builder.Configuration.GetSection(RagOptions.SectionName));
 
-// --- Azure OpenAI client (shared by chat + embeddings) ---
-builder.Services.AddSingleton(sp =>
+// --- Amazon Bedrock runtime client (shared by chat + embeddings) ---
+builder.Services.AddSingleton<IAmazonBedrockRuntime>(sp =>
 {
-    var options = sp.GetRequiredService<IOptions<AzureOpenAIOptions>>().Value;
-    return AzureOpenAIClientFactory.Create(options);
+    var options = sp.GetRequiredService<IOptions<BedrockOptions>>().Value;
+    return BedrockClientFactory.Create(options);
 });
 
 // --- Core services ---
 builder.Services.AddSingleton<IPdfTextExtractor, PdfTextExtractor>();
 builder.Services.AddSingleton<ITextChunker, TextChunker>();
-builder.Services.AddSingleton<IEmbeddingService, AzureOpenAIEmbeddingService>();
-builder.Services.AddSingleton<ISearchService, AzureSearchService>();
-builder.Services.AddSingleton<IGenerationService, AzureOpenAIGenerationService>();
+builder.Services.AddSingleton<IEmbeddingService, BedrockEmbeddingService>();
+builder.Services.AddSingleton<ISearchService, OpenSearchService>();
+builder.Services.AddSingleton<IGenerationService, BedrockGenerationService>();
 builder.Services.AddSingleton<IBillLinker, BillLinker>();
 builder.Services.AddSingleton<ICitationPreviewer, CitationPreviewer>();
 
-// Blob-backed document source (Phase 4). Registered as both the concrete uploader and the
+// S3-backed document source. Registered as both the concrete uploader and the
 // storage-agnostic source consumed by the ingestion pipeline.
-builder.Services.AddSingleton<BlobDocumentSource>();
-builder.Services.AddSingleton<IBlobDocumentSource>(sp => sp.GetRequiredService<BlobDocumentSource>());
-builder.Services.AddSingleton<IDocumentSource>(sp => sp.GetRequiredService<BlobDocumentSource>());
+builder.Services.AddSingleton<S3DocumentSource>();
+builder.Services.AddSingleton<IBlobDocumentSource>(sp => sp.GetRequiredService<S3DocumentSource>());
+builder.Services.AddSingleton<IDocumentSource>(sp => sp.GetRequiredService<S3DocumentSource>());
 
 builder.Services.AddScoped<IIngestionService, IngestionService>();
 builder.Services.AddScoped<IRagService, RagService>();

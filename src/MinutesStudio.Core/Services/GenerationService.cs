@@ -1,9 +1,10 @@
-using Azure.AI.OpenAI;
+using Amazon.BedrockRuntime;
+using Amazon.BedrockRuntime.Model;
 using Microsoft.Extensions.Options;
-using OpenAI.Chat;
 using MinutesStudio.Core.Configuration;
 using MinutesStudio.Core.Models;
 using MinutesStudio.Core.Prompts;
+using TokenUsage = MinutesStudio.Core.Models.TokenUsage;
 
 namespace MinutesStudio.Core.Services;
 
@@ -18,14 +19,18 @@ public interface IGenerationService
     Task<CompletionResult> CompleteAsync(string systemPrompt, string userPrompt, CancellationToken ct = default);
 }
 
-/// <summary>Runs a grounded chat completion against the Azure OpenAI (Foundry) chat deployment.</summary>
-public sealed class AzureOpenAIGenerationService : IGenerationService
+/// <summary>Runs a grounded chat completion against an Amazon Bedrock model via the Converse API.</summary>
+public sealed class BedrockGenerationService : IGenerationService
 {
-    private readonly ChatClient _client;
+    private readonly IAmazonBedrockRuntime _client;
+    private readonly string _modelId;
+    private readonly int _maxTokens;
 
-    public AzureOpenAIGenerationService(AzureOpenAIClient client, IOptions<AzureOpenAIOptions> options)
+    public BedrockGenerationService(IAmazonBedrockRuntime client, IOptions<BedrockOptions> options)
     {
-        _client = client.GetChatClient(options.Value.ChatDeployment);
+        _client = client;
+        _modelId = options.Value.ChatModelId;
+        _maxTokens = options.Value.MaxOutputTokens;
     }
 
     public Task<CompletionResult> CompleteAsync(
@@ -34,23 +39,34 @@ public sealed class AzureOpenAIGenerationService : IGenerationService
 
     public async Task<CompletionResult> CompleteAsync(string systemPrompt, string userPrompt, CancellationToken ct = default)
     {
-        var messages = new List<ChatMessage>
+        var request = new ConverseRequest
         {
-            new SystemChatMessage(systemPrompt),
-            new UserChatMessage(userPrompt)
+            ModelId = _modelId,
+            System = new List<SystemContentBlock> { new() { Text = systemPrompt } },
+            Messages = new List<Message>
+            {
+                new()
+                {
+                    Role = ConversationRole.User,
+                    Content = new List<ContentBlock> { new() { Text = userPrompt } }
+                }
+            },
+            // Converse exposes only the common inference params; Nova requires MaxTokens.
+            InferenceConfig = new InferenceConfiguration { MaxTokens = _maxTokens }
         };
 
-        // GPT-5 family notes: (1) only the default temperature is accepted, and (2) this SDK
-        // version serializes a token cap as the legacy "max_tokens", which these models reject
-        // in favor of "max_completion_tokens" — so we omit the cap and let the prompt bound length.
-        var completion = await Retry.OnTransientAsync(
-            () => _client.CompleteChatAsync(messages, cancellationToken: ct), ct: ct);
+        var response = await Retry.OnTransientAsync(() => _client.ConverseAsync(request, ct), ct: ct);
 
-        var text = string.Concat(completion.Value.Content.Select(part => part.Text));
-        var u = completion.Value.Usage;
+        var text = string.Concat(
+            (response.Output?.Message?.Content ?? new List<ContentBlock>())
+                .Select(part => part.Text)
+                .Where(t => !string.IsNullOrEmpty(t)));
+
+        var u = response.Usage;
         var usage = u is null
             ? TokenUsage.Zero
-            : new TokenUsage(u.InputTokenCount, u.OutputTokenCount, u.TotalTokenCount);
+            : new TokenUsage(u.InputTokens ?? 0, u.OutputTokens ?? 0, u.TotalTokens ?? 0);
+
         return new CompletionResult(text, usage);
     }
 }

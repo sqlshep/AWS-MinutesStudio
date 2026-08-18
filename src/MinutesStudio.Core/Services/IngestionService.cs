@@ -17,7 +17,7 @@ public interface IIngestionService
 
 /// <summary>
 /// Orchestrates the ingestion pipeline: read PDF (from the document source) -> extract text ->
-/// chunk -> embed -> upload to Azure AI Search. The source is abstracted (blob, folder, …).
+/// chunk -> embed -> upload to OpenSearch. The source is abstracted (S3, folder, …).
 /// </summary>
 public sealed partial class IngestionService : IIngestionService
 {
@@ -117,7 +117,7 @@ public sealed partial class IngestionService : IIngestionService
         return documentChunks.Count;
     }
 
-    /// <summary>Azure AI Search keys may only contain letters, digits, dash, underscore, or equals.</summary>
+    /// <summary>Keep document ids to letters, digits, dash, underscore, or equals for safe, stable keys.</summary>
     private static string SanitizeId(string value)
     {
         var cleaned = InvalidKeyChars().Replace(value, "_");

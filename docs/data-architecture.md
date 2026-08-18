@@ -7,37 +7,40 @@ source documents.
 
 - **Frontend / host:** ASP.NET Core Blazor Web App (.NET 8, Interactive Server)
 - **RAG logic:** `MinutesStudio.Core` class library
-- **AI:** Azure OpenAI (Azure AI Foundry) — `gpt-5.4-mini` (chat) + `text-embedding-3-large` (embeddings)
-- **Vector store:** Azure AI Search (hybrid keyword + vector)
-- **Document store:** Azure Blob Storage (source PDFs)
+- **AI:** Amazon Bedrock — Amazon Nova (chat, via the Converse API) + Amazon Titan Text Embeddings v2
+- **Vector store:** Amazon OpenSearch (managed Service domain *or* Serverless), k-NN + BM25
+- **Document store:** Amazon S3 (source PDFs)
 
 ---
 
 ## 1. Services involved
 
-### Azure services
+### AWS services
 
 | Service | Role | Notes |
 | --- | --- | --- |
-| **Azure Blob Storage** | Source of truth for the raw PDFs | Container `minutesstudio-samples`; app can seed from local samples or accept uploads |
-| **Azure OpenAI (Foundry)** | Embeddings + text generation | `text-embedding-3-large` (3072-dim) and `gpt-5.4-mini`; API pinned to `2024-10-21` |
-| **Azure AI Search** | Vector + keyword index | Hybrid search (BM25 + HNSW vectors); index `minutesstudio-minutes` |
+| **Amazon S3** | Source of truth for the raw PDFs | Bucket (e.g. `aws-minutes`); app can seed from local samples or accept uploads |
+| **Amazon Bedrock** | Embeddings + text generation | `amazon.titan-embed-text-v2:0` (1024-dim) and Amazon Nova via the **Converse** API |
+| **Amazon OpenSearch** | Vector + keyword index | k-NN (HNSW) vectors + BM25 keyword; index prefix `minutesstudio-minutes`. Works with a managed domain (`es`) or Serverless (`aoss`) |
+
+Auth for all three uses the **AWS default credential chain** (environment variables, shared profile,
+or an IAM role) — SigV4-signed requests, no keys stored in the app.
 
 ### Application services (`MinutesStudio.Core`)
 
 | Service | Responsibility |
 | --- | --- |
-| `IBlobDocumentSource` / `BlobDocumentSource` | List + stream PDFs from Blob; upload samples / single files |
+| `IBlobDocumentSource` / `S3DocumentSource` | List + stream PDFs from S3; upload samples / single files |
 | `IPdfTextExtractor` / `PdfTextExtractor` | Extract page-by-page text from PDF bytes (PdfPig) |
 | `ITextChunker` / `TextChunker` | Sliding-window chunking with overlap, preserving page ranges |
-| `IEmbeddingService` / `AzureOpenAIEmbeddingService` | Batch-embed text via Azure OpenAI |
-| `ISearchService` / `AzureSearchService` | Create/reset index, upload chunks, hybrid/vector query, list docs |
-| `IGenerationService` / `AzureOpenAIGenerationService` | Chat completions; returns text **+ token usage** |
+| `IEmbeddingService` / `BedrockEmbeddingService` | Embed text via Bedrock Titan (client-side concurrency) |
+| `ISearchService` / `OpenSearchService` | Create/reset index, upload chunks, hybrid/vector query, list docs |
+| `IGenerationService` / `BedrockGenerationService` | Chat completions via Converse; returns text **+ token usage** |
 | `IIngestionService` / `IngestionService` | Orchestrates extract → chunk → embed → index |
 | `IRagService` / `RagService` | Work-product generation (incl. map-reduce) and chat Q&A |
 | `IConnectionChecker` / `ConnectionChecker` | Preflight health probe of all three dependencies |
-| `AzureErrorHelper` | Maps SDK exceptions to actionable messages |
-| `Retry` | Exponential-backoff retry for transient (incl. intermittent 404) failures |
+| `AwsErrorHelper` | Maps AWS SDK exceptions to actionable messages |
+| `Retry` | Exponential-backoff retry for transient (throttling / 5xx / network) failures |
 
 ### HTTP surface (`MinutesStudio.Web`)
 
@@ -55,10 +58,10 @@ flowchart LR
         LF[Local samples folder]
     end
 
-    subgraph Azure
-        BLOB[(Blob Storage<br/>PDFs)]
-        AOAI[Azure OpenAI<br/>embeddings + chat]
-        SEARCH[(Azure AI Search<br/>hybrid index)]
+    subgraph AWS
+        S3[(Amazon S3<br/>PDFs)]
+        BEDROCK[Amazon Bedrock<br/>Titan embeddings + Nova chat]
+        SEARCH[(Amazon OpenSearch<br/>k-NN + BM25 index)]
     end
 
     subgraph App[Blazor Web App + MinutesStudio.Core]
@@ -66,16 +69,16 @@ flowchart LR
         RAG[RagService]
     end
 
-    LF -->|Upload samples| BLOB
-    U -->|Upload PDF| BLOB
+    LF -->|Upload samples| S3
+    U -->|Upload PDF| S3
 
-    BLOB -->|list + stream| ING
-    ING -->|embed chunks| AOAI
+    S3 -->|list + stream| ING
+    ING -->|embed chunks| BEDROCK
     ING -->|upload vectors| SEARCH
 
     U -->|Generate / Ask| RAG
     RAG -->|retrieve / full text| SEARCH
-    RAG -->|embed query + complete| AOAI
+    RAG -->|embed query + complete| BEDROCK
     RAG -->|grounded, cited output| U
 ```
 
@@ -83,35 +86,36 @@ flowchart LR
 
 ## 3. Ingestion pipeline
 
-Triggered from the **Documents & Indexing** page (or `POST /api/ingest`). Reads from Blob Storage only.
+Triggered from the **Documents & Indexing** page (or `POST /api/ingest`). Reads from S3 only.
 
 ```mermaid
 sequenceDiagram
     participant UI as Documents page
     participant ING as IngestionService
-    participant BLOB as Blob Storage
+    participant S3 as Amazon S3
     participant PDF as PdfTextExtractor
     participant CHK as TextChunker
-    participant EMB as EmbeddingService (AOAI)
-    participant SRCH as Azure AI Search
+    participant EMB as EmbeddingService (Bedrock Titan)
+    participant SRCH as Amazon OpenSearch
 
     UI->>ING: IngestAsync(reset)
     ING->>SRCH: EnsureIndex / ResetIndex
-    ING->>BLOB: ListAsync() (*.pdf)
+    ING->>S3: ListAsync() (*.pdf)
     loop each PDF
-        ING->>BLOB: OpenAsync() -> stream -> bytes
+        ING->>S3: OpenAsync() -> stream -> bytes
         ING->>PDF: ExtractPages(bytes)
         ING->>CHK: Chunk(pages, size, overlap)
         ING->>EMB: EmbedBatchAsync(chunk texts)
-        EMB-->>ING: 3072-dim vectors
-        ING->>SRCH: UploadAsync(chunks + vectors + metadata)
+        EMB-->>ING: 1024-dim vectors
+        ING->>SRCH: UploadAsync(chunks + vectors + metadata) via _bulk
     end
     ING-->>UI: IngestionReport(files, chunks)
 ```
 
 **Chunking defaults** (`RagOptions`): `ChunkSizeChars = 3500`, `ChunkOverlapChars = 400`. Chunks keep
 `PageStart`/`PageEnd` so citations can reference page ranges. Document `Title` and `MeetingDate` are
-derived from the filename.
+derived from the filename. Chunks are upserted with a stable `_id` so re-ingesting a file replaces its
+chunks rather than duplicating them.
 
 ---
 
@@ -139,7 +143,8 @@ flowchart TD
 - This avoids cross-meeting fact bleed (e.g. conflated vote counts) and scales past a single prompt.
 
 **Token accounting:** `GenerationResult.Usage` sums input/output tokens across *every* call
-(all MAP drafts + the REDUCE), surfaced as an `in / out` badge in the UI.
+(all MAP drafts + the REDUCE), taken from the Converse response `Usage` and surfaced as an
+`in / out` badge in the UI.
 
 ---
 
@@ -158,30 +163,43 @@ system prompt; the answer is returned with its source passages.
 
 ## 6. Retrieval / index model
 
-Each indexed record is a **chunk** (`SearchIndexDocument`):
+Each indexed record is a **chunk**:
 
 | Field | Purpose |
 | --- | --- |
-| `id` | Stable key: `{sanitized-file}_{chunkIndex}` |
-| `content` | Chunk text (BM25 keyword field) |
-| `contentVector` | 3072-dim embedding (HNSW vector field) |
+| `id` | Stable key: `{sanitized-file}_{chunkIndex}` (also used as the document `_id`) |
+| `content` | Chunk text (`text` field — BM25 keyword scoring) |
+| `contentVector` | 1024-dim embedding (`knn_vector`, HNSW / faiss / l2) |
 | `sourceFile`, `title`, `meetingDate` | Document metadata / citations |
 | `chunkIndex`, `pageStart`, `pageEnd` | Ordering + page-range citations |
 
-The index (`minutesstudio-minutes`) is created with an HNSW vector profile and supports **hybrid** queries —
-combining keyword and vector scoring, which is more robust than either alone for short analyst queries.
+The index (`minutesstudio-minutes-{timestamp}`) is created with `index.knn: true` and an HNSW
+`knn_vector` field. Because OpenSearch Serverless has no server-side hybrid **search pipelines**,
+**hybrid retrieval is performed client-side**: a k-NN query and a BM25 `match` query are run
+independently and fused with **Reciprocal Rank Fusion (RRF)**, which is more robust than either signal
+alone for short analyst queries and works identically on managed and Serverless OpenSearch.
+
+### Index lifecycle
+`IndexName` is a **prefix**; each concrete index is `{prefix}-{yyyyMMdd-HHmmss}`. The newest matching
+index is the active one. **Reset** creates a fresh timestamped index and deletes the older ones. Index
+discovery uses `GET /_alias` (filtered client-side) rather than a `*` wildcard path — see §7.
 
 ---
 
 ## 7. Resilience & error handling
 
 - **Transient-fault retry (`Retry`)** — wraps embedding and chat calls with exponential backoff.
-  Treats `408/429/5xx`, network errors, **and `404`** as transient: this Foundry resource
-  intermittently returns `404 DeploymentNotFound` for deployments that actually exist.
-- **Pinned API version** — the Azure OpenAI client is pinned to `2024-10-21`; older versions 404 for
-  the embedding deployment on this resource.
-- **Actionable errors (`AzureErrorHelper`)** — SDK exceptions are mapped to plain messages
-  (`401/403` → auth, `404` → missing/provisioning, `429` → throttled, `5xx` → transient).
+  Treats `408/429/5xx`, network errors, and AWS throttling (`ThrottlingException`,
+  `ServiceUnavailableException`, etc.) as transient, layered on top of the AWS SDK's own retries.
+- **Provider-portable chat** — chat goes through the Bedrock **Converse** API, so the same code path
+  works across Nova, Claude, Llama, and others; switch models via `Bedrock:ChatModelId`. Note that
+  Amazon Nova 2 is invoked through a **Cross-Region Inference profile** (e.g. `us.amazon.nova-2-lite-v1:0`),
+  not the bare model id.
+- **SigV4 wildcard caveat** — the OpenSearch.Net SigV4 signer and a managed OpenSearch Service (`es`)
+  domain disagree on how to encode `*` in a request path, producing a signature mismatch. The app
+  therefore avoids wildcard paths for signed requests (index discovery uses `GET /_alias`).
+- **Actionable errors (`AwsErrorHelper`)** — SDK exceptions are mapped to plain messages
+  (`401/403` → access denied, `404` → missing, `429` → throttled, `5xx` → transient).
 - **Connection preflight (`IConnectionChecker`, `GET /api/health`)** — probes embeddings, chat, and
   search and reports each OK/failed with timing, so issues are visible before ingestion.
 
@@ -192,19 +210,25 @@ combining keyword and vector scoring, which is more robust than either alone for
 ### Configuration keys
 | Section | Keys |
 | --- | --- |
-| `AzureOpenAI` | `Endpoint`, `ApiKey` (secret), `ChatDeployment`, `EmbeddingDeployment`, `EmbeddingDimensions` |
-| `AzureSearch` | `Endpoint`, `ApiKey` (secret), `IndexName` |
-| `AzureBlob` | `ConnectionString` (secret), `ContainerName` |
+| `Bedrock` | `Region`, `ChatModelId`, `EmbeddingModelId`, `EmbeddingDimensions`, `MaxOutputTokens` |
+| `OpenSearch` | `Endpoint`, `Region`, `IndexName`, `ServiceCode` (optional; auto-detects `es` vs `aoss`) |
+| `S3` | `BucketName`, `Region`, `Prefix` |
 | `Rag` | `ChunkSizeChars`, `ChunkOverlapChars`, `TopK`, `SamplesPath` |
 
-- **Non-secret defaults** live in `appsettings.Development.json` (deployment/index/container names).
-- **Secrets** (keys, connection strings) live in **.NET user-secrets** locally and are never committed.
+- **Non-secret defaults** live in `appsettings.Development.json` (model ids, region, index/bucket names).
+- **No application secrets** — AWS credentials come from the environment (never committed).
 
 ### Auth model
-- **Current (prototype):** API keys / connection strings for all three Azure services. Client
-  factories fall back to `DefaultAzureCredential` when no key is supplied.
-- **Planned (Phase 5):** Entra ID auth on the app + **managed identity** to Azure OpenAI, Search, and
-  Blob (removing keys). `DefaultAzureCredential` handles token acquisition/refresh automatically.
+- **Credentials:** the AWS default credential chain (env vars / shared profile / IAM role). The app
+  never stores access keys.
+- **Bedrock:** requires `bedrock:InvokeModel` (foundation models auto-enable on first invoke in
+  commercial regions).
+- **S3:** `s3:GetObject`, `s3:PutObject`, `s3:ListBucket` on the bucket.
+- **OpenSearch:** `es:ESHttp*` on the domain **plus** the domain's access policy allowing the
+  principal; if fine-grained access control (FGAC) is enabled, the IAM identity must also be mapped to
+  an internal role in OpenSearch Dashboards.
+- **Recommended for deployment:** run under an **IAM role** (ECS task role / App Runner instance role)
+  so no long-lived keys exist.
 
 ---
 
@@ -212,10 +236,10 @@ combining keyword and vector scoring, which is more robust than either alone for
 
 ```mermaid
 flowchart LR
-    PDF[PDF in Blob] --> TXT[Extracted text] --> CH[Chunks] --> VEC[Embeddings]
-    VEC --> IDX[(AI Search index)]
+    PDF[PDF in S3] --> TXT[Extracted text] --> CH[Chunks] --> VEC[Titan embeddings]
+    VEC --> IDX[(OpenSearch index)]
     Q[User request] --> RET[Retrieve / full text from index]
     IDX --> RET
-    RET --> LLM[gpt-5.4-mini prompt]
+    RET --> LLM[Nova Converse prompt]
     LLM --> OUT[Grounded, cited work product / answer + token usage]
 ```

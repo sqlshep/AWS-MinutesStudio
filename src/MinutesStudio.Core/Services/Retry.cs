@@ -1,12 +1,12 @@
-using System.ClientModel;
-using Azure;
+using System.Net;
+using Amazon.Runtime;
 
 namespace MinutesStudio.Core.Services;
 
 /// <summary>
-/// Small retry helper with exponential backoff. Covers the usual transient statuses (408/429/5xx) plus
-/// 404 — this Foundry resource intermittently returns 404 (DeploymentNotFound) for a deployment that
-/// actually exists, so we treat it as transient rather than failing the whole operation.
+/// Small retry helper with exponential backoff. Covers the usual transient statuses (408/429/5xx),
+/// network faults, and AWS throttling. The AWS SDK also retries internally, so this is a second,
+/// operation-level safety net for longer-lived flows (batch embedding, map-reduce generation).
 /// </summary>
 public static class Retry
 {
@@ -32,8 +32,12 @@ public static class Retry
 
     private static bool IsTransient(Exception ex) => ex switch
     {
-        ClientResultException cre => IsTransientStatus(cre.Status),
-        RequestFailedException rfe => IsTransientStatus(rfe.Status),
+        AmazonServiceException ase =>
+            ase.Retryable is not null
+            || IsTransientStatus((int)ase.StatusCode)
+            || ase.ErrorCode is "ThrottlingException" or "TooManyRequestsException"
+                or "ServiceUnavailableException" or "ModelNotReadyException"
+                or "InternalServerException" or "RequestTimeout",
         HttpRequestException => true,
         TaskCanceledException => true,
         TimeoutException => true,
@@ -41,5 +45,7 @@ public static class Retry
     };
 
     private static bool IsTransientStatus(int status) =>
-        status is 404 or 408 or 429 || status >= 500;
+        status is 408 or 429 || status >= 500;
+
+    private static bool IsTransientStatus(HttpStatusCode status) => IsTransientStatus((int)status);
 }

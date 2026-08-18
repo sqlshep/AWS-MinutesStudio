@@ -5,7 +5,7 @@ public sealed record SourceDocumentRef(string FileName, Func<CancellationToken, 
 
 /// <summary>
 /// Abstracts where source documents come from so the ingestion pipeline is storage-agnostic.
-/// Phase 1 used a local folder; Phase 4 uses Blob Storage — both behind this interface.
+/// A local folder or Amazon S3 — both sit behind this interface.
 /// </summary>
 public interface IDocumentSource
 {

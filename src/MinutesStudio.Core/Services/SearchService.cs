@@ -1,13 +1,13 @@
-using Azure;
-using Azure.Identity;
-using Azure.Search.Documents;
-using Azure.Search.Documents.Indexes;
-using Azure.Search.Documents.Indexes.Models;
-using Azure.Search.Documents.Models;
+using System.Text;
+using System.Text.Json;
+using Amazon;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using MinutesStudio.Core.Configuration;
 using MinutesStudio.Core.Models;
+using OpenSearch.Net;
+using OpenSearch.Net.Auth.AwsSigV4;
+using HttpMethod = OpenSearch.Net.HttpMethod;
 
 namespace MinutesStudio.Core.Services;
 
@@ -33,42 +33,61 @@ public interface ISearchService
 }
 
 /// <summary>
-/// Azure AI Search vector store. Creates a hybrid (keyword + vector) index, uploads chunks,
-/// and runs hybrid queries — combining BM25 keyword matching with HNSW vector similarity,
-/// which is more robust than either alone for short analyst questions.
+/// Amazon OpenSearch Serverless (AOSS) vector store. Creates a k-NN + BM25 index, upserts chunks,
+/// and runs hybrid retrieval by combining a knn query with a BM25 match query and fusing the two
+/// result sets with Reciprocal Rank Fusion (RRF) — AOSS does not support server-side search
+/// pipelines, so the fusion is done client-side. This is more robust than either signal alone for
+/// short analyst questions, mirroring the original Azure hybrid behavior.
 /// </summary>
-public sealed class AzureSearchService : ISearchService
+public sealed class OpenSearchService : ISearchService
 {
-    private const string VectorProfile = "vec-profile";
-    private const string HnswConfig = "hnsw-config";
+    /// <summary>RRF damping constant. 60 is the value from the original RRF paper and a common default.</summary>
+    private const int RrfK = 60;
 
-    private readonly SearchIndexClient _indexClient;
-    private readonly AzureSearchOptions _options;
+    private readonly OpenSearchLowLevelClient _client;
     private readonly int _dimensions;
-    private readonly ILogger<AzureSearchService> _logger;
+    private readonly ILogger<OpenSearchService> _logger;
 
     /// <summary>Configured IndexName is treated as a prefix; each concrete index is "{prefix}-{yyyyMMdd-HHmmss}".</summary>
     private readonly string _prefix;
     private readonly SemaphoreSlim _activeLock = new(1, 1);
     private string? _activeIndex;
 
-    public AzureSearchService(
-        IOptions<AzureSearchOptions> searchOptions,
-        IOptions<AzureOpenAIOptions> openAiOptions,
-        ILogger<AzureSearchService> logger)
+    public OpenSearchService(
+        IOptions<OpenSearchOptions> searchOptions,
+        IOptions<BedrockOptions> bedrockOptions,
+        ILogger<OpenSearchService> logger)
     {
-        _options = searchOptions.Value;
-        _dimensions = openAiOptions.Value.EmbeddingDimensions;
+        var options = searchOptions.Value;
+        _dimensions = bedrockOptions.Value.EmbeddingDimensions;
         _logger = logger;
-        _prefix = _options.IndexName;
+        _prefix = options.IndexName;
 
-        var endpoint = new Uri(_options.Endpoint);
-        _indexClient = string.IsNullOrWhiteSpace(_options.ApiKey)
-            ? new SearchIndexClient(endpoint, new DefaultAzureCredential())
-            : new SearchIndexClient(endpoint, new AzureKeyCredential(_options.ApiKey));
+        if (string.IsNullOrWhiteSpace(options.Endpoint))
+            throw new InvalidOperationException(
+                "OpenSearch:Endpoint is not configured. Set it via user-secrets or app settings.");
+
+        var endpoint = new Uri(options.Endpoint);
+        var region = RegionEndpoint.GetBySystemName(
+            string.IsNullOrWhiteSpace(options.Region) ? "us-east-1" : options.Region);
+
+        // "es" = managed OpenSearch Service domain, "aoss" = Serverless collection. Auto-detect
+        // from the endpoint host when not explicitly configured.
+        var serviceCode = string.IsNullOrWhiteSpace(options.ServiceCode)
+            ? (endpoint.Host.Contains(".aoss.", StringComparison.OrdinalIgnoreCase)
+                ? AwsSigV4HttpConnection.OpenSearchServerlessService
+                : AwsSigV4HttpConnection.OpenSearchService)
+            : options.ServiceCode;
+
+        var connection = new AwsSigV4HttpConnection(region, service: serviceCode);
+        // DisableDirectStreaming so the server's response body is captured even on errors (needed to
+        // surface the real reason behind a 403 — IAM/access-policy vs FGAC).
+        var config = new ConnectionConfiguration(endpoint, connection).DisableDirectStreaming();
+        _client = new OpenSearchLowLevelClient(config);
+        _logger.LogInformation("OpenSearch client configured for {Host} (SigV4 service '{Service}').",
+            endpoint.Host, serviceCode);
     }
 
-    /// <summary>Resolves (and caches) the newest index matching the prefix. Timestamped names sort chronologically.</summary>
     public async Task<string?> GetActiveIndexNameAsync(CancellationToken ct = default)
     {
         if (_activeIndex is not null) return _activeIndex;
@@ -77,18 +96,7 @@ public sealed class AzureSearchService : ISearchService
         try
         {
             if (_activeIndex is not null) return _activeIndex;
-
-            var matches = new List<string>();
-            await foreach (var name in _indexClient.GetIndexNamesAsync(ct))
-            {
-                if (name.StartsWith(_prefix + "-", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(name, _prefix, StringComparison.OrdinalIgnoreCase))
-                {
-                    matches.Add(name);
-                }
-            }
-
-            _activeIndex = matches
+            _activeIndex = (await ListMatchingIndexesAsync(ct))
                 .OrderByDescending(n => n, StringComparer.OrdinalIgnoreCase)
                 .FirstOrDefault();
             return _activeIndex;
@@ -99,17 +107,34 @@ public sealed class AzureSearchService : ISearchService
         }
     }
 
-    private async Task<SearchClient> GetActiveSearchClientAsync(CancellationToken ct)
+    /// <summary>
+    /// Lists prefix-matching indexes via "GET /_alias" (every index appears as a JSON key), filtering
+    /// client-side. Deliberately avoids a "*" wildcard and a query string in the request path: the
+    /// AWS SigV4 signer and a managed OpenSearch Service (es) domain disagree on how to encode "*",
+    /// and the low-level client rejects query strings in the path.
+    /// </summary>
+    private async Task<IReadOnlyList<string>> ListMatchingIndexesAsync(CancellationToken ct)
     {
-        var name = await GetActiveIndexNameAsync(ct)
-            ?? throw new InvalidOperationException("No search index exists yet. Ingest documents first.");
-        return _indexClient.GetSearchClient(name);
+        var response = await _client.DoRequestAsync<StringResponse>(
+            HttpMethod.GET, "/_alias", ct);
+        EnsureSuccess(response, "list indexes");
+
+        using var doc = JsonDocument.Parse(response.Body);
+        return doc.RootElement.EnumerateObject()
+            .Select(p => p.Name)
+            .Where(name =>
+                name.StartsWith(_prefix + "-", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(name, _prefix, StringComparison.OrdinalIgnoreCase))
+            .ToList();
     }
 
     private async Task<string> CreateNewIndexAsync(CancellationToken ct)
     {
         var name = $"{_prefix}-{DateTime.Now:yyyyMMdd-HHmmss}";
-        await _indexClient.CreateOrUpdateIndexAsync(BuildIndex(name), cancellationToken: ct);
+        var body = BuildIndexBody();
+        var response = await _client.DoRequestAsync<StringResponse>(
+            HttpMethod.PUT, $"/{name}", ct, PostData.String(body));
+        EnsureSuccess(response, $"create index '{name}'");
 
         await _activeLock.WaitAsync(ct);
         try { _activeIndex = name; }
@@ -133,29 +158,18 @@ public sealed class AzureSearchService : ISearchService
 
     public async Task ResetIndexAsync(CancellationToken ct = default)
     {
-        // Snapshot the existing prefix-matching indexes so we can clean them up after switching.
-        var old = new List<string>();
-        await foreach (var name in _indexClient.GetIndexNamesAsync(ct))
-        {
-            if (name.StartsWith(_prefix + "-", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(name, _prefix, StringComparison.OrdinalIgnoreCase))
-            {
-                old.Add(name);
-            }
-        }
-
-        // Create a brand-new, ready-to-use index (no delete-then-recreate race on the same name).
+        var old = await ListMatchingIndexesAsync(ct);
         var created = await CreateNewIndexAsync(ct);
 
-        // Best-effort cleanup of the now-orphaned older indexes.
         foreach (var name in old.Where(n => !string.Equals(n, created, StringComparison.OrdinalIgnoreCase)))
         {
             try
             {
-                await _indexClient.DeleteIndexAsync(name, ct);
+                var response = await _client.DoRequestAsync<StringResponse>(HttpMethod.DELETE, $"/{name}", ct);
+                EnsureSuccess(response, $"delete index '{name}'");
                 _logger.LogInformation("Deleted old search index '{Index}'.", name);
             }
-            catch (RequestFailedException ex)
+            catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Could not delete old index '{Index}'.", name);
             }
@@ -166,117 +180,45 @@ public sealed class AzureSearchService : ISearchService
     {
         if (chunks.Count == 0) return;
 
-        var client = await GetActiveSearchClientAsync(ct);
-        var documents = chunks.Select(c => new SearchIndexDocument
-        {
-            Id = c.Id,
-            Content = c.Content,
-            SourceFile = c.SourceFile,
-            Title = c.Title,
-            MeetingDate = c.MeetingDate,
-            ChunkIndex = c.ChunkIndex,
-            PageStart = c.PageStart,
-            PageEnd = c.PageEnd,
-            ContentVector = c.ContentVector.ToArray()
-        }).ToList();
+        var index = await GetActiveIndexNameAsync(ct)
+            ?? throw new InvalidOperationException("No search index exists yet. Ingest documents first.");
 
-        // Batch to stay well under service payload limits.
         const int batchSize = 50;
-        for (var i = 0; i < documents.Count; i += batchSize)
+        for (var i = 0; i < chunks.Count; i += batchSize)
         {
-            var batch = documents.Skip(i).Take(batchSize).ToList();
-            await client.MergeOrUploadDocumentsAsync(batch, cancellationToken: ct);
+            var batch = chunks.Skip(i).Take(batchSize).ToList();
+            var ndjson = BuildBulkBody(index, batch);
+            var response = await Retry.OnTransientAsync(
+                () => _client.DoRequestAsync<StringResponse>(
+                    HttpMethod.POST, "/_bulk", ct, PostData.String(ndjson)), ct: ct);
+            EnsureSuccess(response, "bulk upload");
+            EnsureNoBulkErrors(response);
         }
 
-        _logger.LogInformation("Uploaded {Count} chunks to '{Index}'.", documents.Count, _activeIndex);
+        _logger.LogInformation("Uploaded {Count} chunks to '{Index}'.", chunks.Count, index);
     }
 
     public async Task<IReadOnlyList<RetrievedChunk>> SearchAsync(
         string queryText, ReadOnlyMemory<float> queryVector, int topK, CancellationToken ct = default)
     {
-        var options = new SearchOptions
-        {
-            Size = topK,
-            VectorSearch = new VectorSearchOptions
-            {
-                Queries =
-                {
-                    new VectorizedQuery(queryVector)
-                    {
-                        KNearestNeighborsCount = topK,
-                        Fields = { "contentVector" }
-                    }
-                }
-            }
-        };
-        options.Select.Add("id");
-        options.Select.Add("content");
-        options.Select.Add("sourceFile");
-        options.Select.Add("title");
-        options.Select.Add("meetingDate");
-        options.Select.Add("chunkIndex");
-
         var active = await GetActiveIndexNameAsync(ct);
         if (active is null) return Array.Empty<RetrievedChunk>();
-        var client = _indexClient.GetSearchClient(active);
 
-        // Passing queryText alongside the vector query makes this a hybrid search.
-        var response = await client.SearchAsync<SearchIndexDocument>(queryText, options, ct);
+        // Two independent retrievals fused with RRF (client-side hybrid).
+        var vectorHits = await RunSearchAsync(active, BuildKnnQuery(queryVector, topK), ct);
+        var keywordHits = await RunSearchAsync(active, BuildKeywordQuery(queryText, topK), ct);
 
-        var results = new List<RetrievedChunk>();
-        await foreach (var item in response.Value.GetResultsAsync())
-        {
-            var doc = item.Document;
-            results.Add(new RetrievedChunk
-            {
-                Id = doc.Id,
-                Content = doc.Content,
-                SourceFile = doc.SourceFile,
-                Title = doc.Title,
-                MeetingDate = doc.MeetingDate,
-                ChunkIndex = doc.ChunkIndex,
-                Score = item.Score ?? 0d
-            });
-        }
-
-        return results;
+        return FuseWithRrf(vectorHits, keywordHits, topK);
     }
 
     public async Task<IReadOnlyList<RetrievedChunk>> GetChunksAsync(string? sourceFile, CancellationToken ct = default)
     {
-        var options = new SearchOptions { Size = 1000 };
-        options.Select.Add("id");
-        options.Select.Add("content");
-        options.Select.Add("sourceFile");
-        options.Select.Add("title");
-        options.Select.Add("meetingDate");
-        options.Select.Add("chunkIndex");
-        if (!string.IsNullOrWhiteSpace(sourceFile))
-            options.Filter = $"sourceFile eq '{sourceFile.Replace("'", "''")}'";
-
         var active = await GetActiveIndexNameAsync(ct);
         if (active is null) return Array.Empty<RetrievedChunk>();
-        var client = _indexClient.GetSearchClient(active);
 
-        var response = await client.SearchAsync<SearchIndexDocument>("*", options, ct);
+        var hits = await RunSearchAsync(active, BuildFetchAllQuery(sourceFile), ct);
 
-        var results = new List<RetrievedChunk>();
-        await foreach (var item in response.Value.GetResultsAsync())
-        {
-            var doc = item.Document;
-            results.Add(new RetrievedChunk
-            {
-                Id = doc.Id,
-                Content = doc.Content,
-                SourceFile = doc.SourceFile,
-                Title = doc.Title,
-                MeetingDate = doc.MeetingDate,
-                ChunkIndex = doc.ChunkIndex,
-                Score = item.Score ?? 0d
-            });
-        }
-
-        return results
+        return hits
             .OrderBy(c => c.MeetingDate ?? string.Empty, StringComparer.Ordinal)
             .ThenBy(c => c.SourceFile, StringComparer.Ordinal)
             .ThenBy(c => c.ChunkIndex)
@@ -304,40 +246,207 @@ public sealed class AzureSearchService : ISearchService
         var active = await GetActiveIndexNameAsync(ct);
         if (active is null) return 0;
 
-        try
-        {
-            var response = await _indexClient.GetSearchClient(active).GetDocumentCountAsync(ct);
-            return response.Value;
-        }
-        catch (RequestFailedException ex) when (ex.Status == 404)
-        {
-            return 0;
-        }
+        const string body = "{\"size\":0,\"track_total_hits\":true,\"query\":{\"match_all\":{}}}";
+        var response = await _client.DoRequestAsync<StringResponse>(
+            HttpMethod.POST, $"/{active}/_search", ct, PostData.String(body));
+        if (!response.Success) return 0;
+
+        using var doc = JsonDocument.Parse(response.Body);
+        return doc.RootElement.GetProperty("hits").GetProperty("total").GetProperty("value").GetInt64();
     }
 
-    private SearchIndex BuildIndex(string indexName) => new(indexName)
+    // ---- query bodies -------------------------------------------------------
+
+    private static string BuildKnnQuery(ReadOnlyMemory<float> vector, int topK)
     {
-        Fields =
+        var sb = new StringBuilder();
+        sb.Append("{\"size\":").Append(topK)
+          .Append(",\"_source\":").Append(SourceFields)
+          .Append(",\"query\":{\"knn\":{\"contentVector\":{\"vector\":[");
+        var span = vector.Span;
+        for (var i = 0; i < span.Length; i++)
         {
-            new SimpleField("id", SearchFieldDataType.String) { IsKey = true, IsFilterable = true },
-            new SearchableField("content"),
-            new SimpleField("sourceFile", SearchFieldDataType.String) { IsFilterable = true, IsFacetable = true },
-            new SearchableField("title") { IsFilterable = true },
-            new SimpleField("meetingDate", SearchFieldDataType.String) { IsFilterable = true, IsSortable = true },
-            new SimpleField("chunkIndex", SearchFieldDataType.Int32) { IsFilterable = true },
-            new SimpleField("pageStart", SearchFieldDataType.Int32),
-            new SimpleField("pageEnd", SearchFieldDataType.Int32),
-            new SearchField("contentVector", SearchFieldDataType.Collection(SearchFieldDataType.Single))
-            {
-                IsSearchable = true,
-                VectorSearchDimensions = _dimensions,
-                VectorSearchProfileName = VectorProfile
-            }
-        },
-        VectorSearch = new VectorSearch
-        {
-            Profiles = { new VectorSearchProfile(VectorProfile, HnswConfig) },
-            Algorithms = { new HnswAlgorithmConfiguration(HnswConfig) }
+            if (i > 0) sb.Append(',');
+            sb.Append(span[i].ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
-    };
+        sb.Append("],\"k\":").Append(topK).Append("}}}}");
+        return sb.ToString();
+    }
+
+    private static string BuildKeywordQuery(string queryText, int topK) =>
+        $"{{\"size\":{topK},\"_source\":{SourceFields}," +
+        $"\"query\":{{\"match\":{{\"content\":{JsonSerializer.Serialize(queryText)}}}}}}}";
+
+    private static string BuildFetchAllQuery(string? sourceFile)
+    {
+        var query = string.IsNullOrWhiteSpace(sourceFile)
+            ? "{\"match_all\":{}}"
+            : $"{{\"term\":{{\"sourceFile\":{JsonSerializer.Serialize(sourceFile)}}}}}";
+        return $"{{\"size\":1000,\"_source\":{SourceFields},\"query\":{query}}}";
+    }
+
+    private const string SourceFields =
+        "[\"id\",\"content\",\"sourceFile\",\"title\",\"meetingDate\",\"chunkIndex\"]";
+
+    private async Task<List<RetrievedChunk>> RunSearchAsync(string index, string body, CancellationToken ct)
+    {
+        var response = await Retry.OnTransientAsync(
+            () => _client.DoRequestAsync<StringResponse>(
+                HttpMethod.POST, $"/{index}/_search", ct, PostData.String(body)), ct: ct);
+        EnsureSuccess(response, "search");
+        return ParseHits(response.Body);
+    }
+
+    private static List<RetrievedChunk> ParseHits(string json)
+    {
+        var results = new List<RetrievedChunk>();
+        using var doc = JsonDocument.Parse(json);
+        if (!doc.RootElement.TryGetProperty("hits", out var hitsRoot)) return results;
+        if (!hitsRoot.TryGetProperty("hits", out var hits)) return results;
+
+        foreach (var hit in hits.EnumerateArray())
+        {
+            var src = hit.GetProperty("_source");
+            results.Add(new RetrievedChunk
+            {
+                Id = GetString(src, "id"),
+                Content = GetString(src, "content"),
+                SourceFile = GetString(src, "sourceFile"),
+                Title = GetString(src, "title"),
+                MeetingDate = src.TryGetProperty("meetingDate", out var md) && md.ValueKind == JsonValueKind.String
+                    ? md.GetString()
+                    : null,
+                ChunkIndex = src.TryGetProperty("chunkIndex", out var ci) && ci.ValueKind == JsonValueKind.Number
+                    ? ci.GetInt32()
+                    : 0,
+                Score = hit.TryGetProperty("_score", out var sc) && sc.ValueKind == JsonValueKind.Number
+                    ? sc.GetDouble()
+                    : 0d
+            });
+        }
+
+        return results;
+    }
+
+    /// <summary>Reciprocal Rank Fusion of two ranked result lists, keyed by chunk id.</summary>
+    private static IReadOnlyList<RetrievedChunk> FuseWithRrf(
+        IReadOnlyList<RetrievedChunk> a, IReadOnlyList<RetrievedChunk> b, int topK)
+    {
+        var scores = new Dictionary<string, double>();
+        var byId = new Dictionary<string, RetrievedChunk>();
+
+        void Accumulate(IReadOnlyList<RetrievedChunk> list)
+        {
+            for (var rank = 0; rank < list.Count; rank++)
+            {
+                var chunk = list[rank];
+                scores[chunk.Id] = scores.GetValueOrDefault(chunk.Id) + 1.0 / (RrfK + rank + 1);
+                byId.TryAdd(chunk.Id, chunk);
+            }
+        }
+
+        Accumulate(a);
+        Accumulate(b);
+
+        return scores
+            .OrderByDescending(kv => kv.Value)
+            .Take(topK)
+            .Select(kv =>
+            {
+                var c = byId[kv.Key];
+                return new RetrievedChunk
+                {
+                    Id = c.Id,
+                    Content = c.Content,
+                    SourceFile = c.SourceFile,
+                    Title = c.Title,
+                    MeetingDate = c.MeetingDate,
+                    ChunkIndex = c.ChunkIndex,
+                    Score = kv.Value
+                };
+            })
+            .ToList();
+    }
+
+    // ---- index + bulk bodies ------------------------------------------------
+
+    private string BuildIndexBody() =>
+        "{" +
+            "\"settings\":{\"index.knn\":true}," +
+            "\"mappings\":{\"properties\":{" +
+                "\"id\":{\"type\":\"keyword\"}," +
+                "\"content\":{\"type\":\"text\"}," +
+                "\"sourceFile\":{\"type\":\"keyword\"}," +
+                "\"title\":{\"type\":\"text\",\"fields\":{\"raw\":{\"type\":\"keyword\"}}}," +
+                "\"meetingDate\":{\"type\":\"keyword\"}," +
+                "\"chunkIndex\":{\"type\":\"integer\"}," +
+                "\"pageStart\":{\"type\":\"integer\"}," +
+                "\"pageEnd\":{\"type\":\"integer\"}," +
+                "\"contentVector\":{\"type\":\"knn_vector\",\"dimension\":" + _dimensions +
+                    ",\"method\":{\"name\":\"hnsw\",\"engine\":\"faiss\",\"space_type\":\"l2\"}}" +
+            "}}" +
+        "}";
+
+    private static string BuildBulkBody(string index, IReadOnlyList<DocumentChunk> chunks)
+    {
+        var sb = new StringBuilder();
+        foreach (var c in chunks)
+        {
+            // Custom _id gives idempotent upserts (re-ingesting a file replaces its chunks).
+            sb.Append("{\"index\":{\"_index\":").Append(JsonSerializer.Serialize(index))
+              .Append(",\"_id\":").Append(JsonSerializer.Serialize(c.Id)).Append("}}\n");
+
+            var source = JsonSerializer.Serialize(new
+            {
+                id = c.Id,
+                content = c.Content,
+                sourceFile = c.SourceFile,
+                title = c.Title,
+                meetingDate = c.MeetingDate,
+                chunkIndex = c.ChunkIndex,
+                pageStart = c.PageStart,
+                pageEnd = c.PageEnd,
+                contentVector = c.ContentVector.ToArray()
+            });
+            sb.Append(source).Append('\n');
+        }
+
+        return sb.ToString();
+    }
+
+    // ---- helpers ------------------------------------------------------------
+
+    private static string GetString(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString() ?? string.Empty
+            : string.Empty;
+
+    private static void EnsureSuccess(StringResponse response, string action)
+    {
+        if (response.Success) return;
+        // Prefer the server's response body (contains the real authz reason); fall back to the
+        // low-level exception message. Body is populated because DisableDirectStreaming is on.
+        var body = string.IsNullOrWhiteSpace(response.Body) ? null : response.Body.Trim();
+        var detail = body ?? response.OriginalException?.Message ?? "unknown error";
+        throw new InvalidOperationException(
+            $"OpenSearch request failed ({action}, HTTP {(int)response.HttpStatusCode.GetValueOrDefault()}): {detail}",
+            response.OriginalException);
+    }
+
+    private static void EnsureNoBulkErrors(StringResponse response)
+    {
+        using var doc = JsonDocument.Parse(response.Body);
+        if (doc.RootElement.TryGetProperty("errors", out var errors) &&
+            errors.ValueKind == JsonValueKind.True)
+        {
+            var first = doc.RootElement.GetProperty("items").EnumerateArray()
+                .Select(i => i.EnumerateObject().First().Value)
+                .FirstOrDefault(op => op.TryGetProperty("error", out _));
+            var reason = first.ValueKind == JsonValueKind.Object &&
+                         first.TryGetProperty("error", out var err)
+                ? err.ToString()
+                : "one or more bulk items failed";
+            throw new InvalidOperationException($"OpenSearch bulk indexing error: {reason}");
+        }
+    }
 }

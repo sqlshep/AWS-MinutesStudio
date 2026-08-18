@@ -28,30 +28,30 @@ public sealed class ConnectionChecker : IConnectionChecker
     private readonly IEmbeddingService _embeddings;
     private readonly IGenerationService _generation;
     private readonly ISearchService _search;
-    private readonly AzureOpenAIOptions _openAi;
+    private readonly BedrockOptions _bedrock;
 
     public ConnectionChecker(
         IEmbeddingService embeddings,
         IGenerationService generation,
         ISearchService search,
-        IOptions<AzureOpenAIOptions> openAi)
+        IOptions<BedrockOptions> bedrock)
     {
         _embeddings = embeddings;
         _generation = generation;
         _search = search;
-        _openAi = openAi.Value;
+        _bedrock = bedrock.Value;
     }
 
     public async Task<ConnectionReport> CheckAsync(CancellationToken ct = default)
     {
         var results = new List<DependencyStatus>
         {
-            await ProbeAsync($"Embeddings ({_openAi.EmbeddingDeployment})", async () =>
+            await ProbeAsync($"Embeddings ({_bedrock.EmbeddingModelId})", async () =>
             {
                 var v = await _embeddings.EmbedAsync("ping", ct);
                 return $"OK — {v.Length}-dim vector";
             }),
-            await ProbeAsync($"Chat ({_openAi.ChatDeployment})", async () =>
+            await ProbeAsync($"Chat ({_bedrock.ChatModelId})", async () =>
             {
                 await _generation.CompleteAsync("You are a health probe. Reply with 'ok'.", "ping", ct);
                 return "OK";
@@ -81,7 +81,7 @@ public sealed class ConnectionChecker : IConnectionChecker
         catch (Exception ex)
         {
             sw.Stop();
-            return new DependencyStatus(name, false, AzureErrorHelper.Describe(ex), sw.ElapsedMilliseconds);
+            return new DependencyStatus(name, false, AwsErrorHelper.Describe(ex), sw.ElapsedMilliseconds);
         }
     }
 }

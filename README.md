@@ -2,7 +2,7 @@
 
 A prototype **Retrieval-Augmented Generation (RAG)** application that ingests meeting-minute PDFs and
 generates grounded, cited analyst **work products** — plus a free-form **document chat** — using
-Azure OpenAI and Azure AI Search.
+**Amazon Bedrock** and **Amazon OpenSearch Serverless**.
 
 It is purpose-built for **meeting minutes from congressional committee meetings** — the domain shapes
 the whole app: work products are the kinds of deliverables a committee/legislative-affairs team
@@ -32,7 +32,7 @@ meeting (and page range), so answers stay traceable and free of fabrication.
 - **Tone / length / reference controls** — adjust output style and choose whether references are
   included, hidden, or stripped for a clean, email-safe copy.
 - **Token accounting** — input/output/total token usage surfaced per generation.
-- **Document management** — list, preview (inline PDF), upload, and (re)index PDFs in Blob Storage.
+- **Document management** — list, preview (inline PDF), upload, and (re)index PDFs in Amazon S3.
 - **Health preflight** — checks embeddings, chat, and search connectivity before you ingest.
 
 ---
@@ -41,10 +41,12 @@ meeting (and page range), so answers stay traceable and free of fabrication.
 
 - **.NET 8**, ASP.NET Core **Blazor Web App** (Interactive Server) — `MinutesStudio.Web`
 - **RAG core** class library — `MinutesStudio.Core`
-- **Azure OpenAI** (Azure AI Foundry) — `gpt-5.4-mini` (chat) + `text-embedding-3-large` (3072-dim embeddings)
-- **Azure AI Search** — hybrid (BM25 + HNSW vector) index
-- **Azure Blob Storage** — source PDFs
+- **Amazon Bedrock** — Amazon Nova (chat, via the **Converse** API) + Amazon Titan Text Embeddings v2 (1024-dim)
+- **Amazon OpenSearch Serverless** — k-NN (HNSW) vector index; hybrid retrieval via client-side Reciprocal Rank Fusion (BM25 + vector)
+- **Amazon S3** — source PDFs
 - **UglyToad.PdfPig** — PDF text extraction · **Markdig** — Markdown rendering
+
+Auth uses the standard **AWS credential chain** (environment variables, shared profile, or an IAM role) — no keys are stored in the app.
 
 ---
 
@@ -58,7 +60,7 @@ meeting (and page range), so answers stay traceable and free of fabrication.
 ├── samples/                        # Sample meeting-minute PDFs
 └── src/
     ├── MinutesStudio.Core/         # RAG logic (no UI dependencies)
-    │   ├── Configuration/          # Options: AzureOpenAI, AzureSearch, AzureBlob, Rag
+    │   ├── Configuration/          # Options: Bedrock, OpenSearch, S3, Rag
     │   ├── Models/
     │   ├── Prompts/                # PromptLibrary + grounding rules
     │   └── Services/               # Ingestion, embeddings, search, generation, RAG, etc.
@@ -77,23 +79,23 @@ flowchart LR
         U[User / analyst]
         LF[Local samples folder]
     end
-    subgraph Azure
-        BLOB[(Blob Storage<br/>PDFs)]
-        AOAI[Azure OpenAI<br/>embeddings + chat]
-        SEARCH[(Azure AI Search<br/>hybrid index)]
+    subgraph AWS
+        S3[(Amazon S3<br/>PDFs)]
+        BEDROCK[Amazon Bedrock<br/>Titan embeddings + Nova chat]
+        SEARCH[(OpenSearch Serverless<br/>k-NN vector index)]
     end
     subgraph App[Blazor Web App + MinutesStudio.Core]
         ING[IngestionService]
         RAG[RagService]
     end
-    LF -->|Upload samples| BLOB
-    U -->|Upload PDF| BLOB
-    BLOB -->|list + stream| ING
-    ING -->|embed chunks| AOAI
+    LF -->|Upload samples| S3
+    U -->|Upload PDF| S3
+    S3 -->|list + stream| ING
+    ING -->|embed chunks| BEDROCK
     ING -->|upload vectors| SEARCH
     U -->|Generate / Ask| RAG
     RAG -->|retrieve / full text| SEARCH
-    RAG -->|embed query + complete| AOAI
+    RAG -->|embed query + complete| BEDROCK
     RAG -->|grounded, cited output| U
 ```
 
@@ -106,46 +108,51 @@ map-reduce generation, index model, and resilience details. The doc is also view
 ## Prerequisites
 
 - [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
-- An **Azure OpenAI (Azure AI Foundry)** resource with two deployments:
-  - a chat model (default deployment name `gpt-5.4-mini`)
-  - `text-embedding-3-large` (embeddings)
-- An **Azure AI Search** service (Basic tier or higher; needs an admin key or RBAC).
-- An **Azure Blob Storage** account with a container for the source PDFs.
+- An AWS account with **Amazon Bedrock model access enabled** (in the console → *Model access*) for:
+  - a chat model — **Amazon Nova** (default `us.amazon.nova-pro-v1:0`)
+  - **Amazon Titan Text Embeddings v2** (`amazon.titan-embed-text-v2:0`)
+- An **Amazon OpenSearch** vector store — either a managed **OpenSearch Service** domain or a
+  **Serverless** collection — with an access policy granting your identity read/write. The SigV4
+  service code (`es` vs `aoss`) is auto-detected from the endpoint.
+- An **Amazon S3** bucket for the source PDFs.
+- AWS credentials available to the app via the standard chain (env vars, a shared profile, or an IAM
+  role) with permissions for `bedrock:InvokeModel`, `aoss:APIAccessAll`, and S3 read/write on the bucket.
 
 ---
 
 ## Configuration
 
-Non-secret defaults (deployment / index / container names, chunking) live in
-`src/MinutesStudio.Web/appsettings.Development.json`. **Secrets are never committed** — set them via
-[.NET user-secrets](https://learn.microsoft.com/aspnet/core/security/app-secrets).
+Non-secret defaults (model ids / index / bucket names, region, chunking) live in
+`src/MinutesStudio.Web/appsettings.Development.json`. There are **no application secrets** — AWS
+credentials come from the environment. Set the resource-specific values there (or via
+[.NET user-secrets](https://learn.microsoft.com/aspnet/core/security/app-secrets)), at minimum the
+OpenSearch collection endpoint and your S3 bucket name:
 
 ```bash
 cd src/MinutesStudio.Web
 
-# Azure OpenAI (Foundry)
-dotnet user-secrets set "AzureOpenAI:Endpoint" "https://<your-foundry>.services.ai.azure.com/"
-dotnet user-secrets set "AzureOpenAI:ApiKey"   "<your-aoai-key>"
+dotnet user-secrets set "OpenSearch:Endpoint" "https://<domain-or-collection-endpoint>"
+dotnet user-secrets set "S3:BucketName"       "<your-bucket>"
+```
 
-# Azure AI Search
-dotnet user-secrets set "AzureSearch:Endpoint" "https://<your-search>.search.windows.net"
-dotnet user-secrets set "AzureSearch:ApiKey"   "<your-search-admin-key>"
+Provide AWS credentials the usual way, e.g.:
 
-# Azure Blob Storage
-dotnet user-secrets set "AzureBlob:ConnectionString" "<your-storage-connection-string>"
+```bash
+export AWS_REGION=us-east-1
+export AWS_PROFILE=<your-profile>   # or AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, or an IAM role
 ```
 
 ### Configuration keys
 
 | Section | Keys |
 | --- | --- |
-| `AzureOpenAI` | `Endpoint`, `ApiKey` *(secret)*, `ChatDeployment`, `EmbeddingDeployment`, `EmbeddingDimensions` |
-| `AzureSearch` | `Endpoint`, `ApiKey` *(secret)*, `IndexName` |
-| `AzureBlob` | `ConnectionString` *(secret)*, `ContainerName` |
+| `Bedrock` | `Region`, `ChatModelId`, `EmbeddingModelId`, `EmbeddingDimensions`, `MaxOutputTokens` |
+| `OpenSearch` | `Endpoint`, `Region`, `IndexName`, `ServiceCode` (optional; auto-detects `es` vs `aoss`) |
+| `S3` | `BucketName`, `Region`, `Prefix` |
 | `Rag` | `ChunkSizeChars`, `ChunkOverlapChars`, `TopK`, `SamplesPath` |
 
-> If an API key / connection string is left empty, the app falls back to `DefaultAzureCredential`
-> (managed identity / `az login`), which is the preferred path for an Azure deployment.
+> All AWS access uses the standard credential chain (env vars / shared profile / IAM role). Prefer an
+> IAM role in a deployed environment so no long-lived keys are needed.
 
 ---
 
@@ -162,12 +169,13 @@ environment so your user-secrets load).
 ### First run — load and index documents
 
 1. Go to the **Documents** page.
-2. **Upload samples** (seeds Blob Storage from the local `samples/` folder) or upload your own PDFs.
+2. **Upload samples** (seeds S3 from the local `samples/` folder) or upload your own PDFs.
 3. Click **Ingest** to extract → chunk → embed → index the PDFs.
 4. Head to **Work Products** or **Chat** and start generating.
 
-> The Azure AI Search index prefix is `minutesstudio-minutes`. Resetting the index creates a new
-> timestamped index and cleans up the old ones automatically.
+> The OpenSearch index prefix is `minutesstudio-minutes`. Resetting the index creates a new
+> timestamped index and cleans up the old ones automatically. (OpenSearch Serverless is near-real-time,
+> so freshly-ingested counts may take a few seconds to appear.)
 
 ---
 
@@ -178,8 +186,8 @@ A lightweight JSON API is exposed for automation and scripting:
 | Method & path | Purpose |
 | --- | --- |
 | `POST /api/ingest?reset=true` | Run the ingestion pipeline (reset rebuilds the index) |
-| `POST /api/blob/upload-samples` | Seed Blob Storage from the local samples folder |
-| `GET /api/blob/preview?name=<blob>` | Stream a PDF inline |
+| `POST /api/blob/upload-samples` | Seed S3 from the local samples folder |
+| `GET /api/blob/preview?name=<file>` | Stream a PDF inline from S3 |
 | `GET /api/workproduct?type=<type>&sourceFile=<file>&tone=&length=&references=` | Generate a work product |
 | `GET /api/ask?q=<question>&sourceFile=<file>` | Ask a grounded question |
 | `GET /api/health` | Preflight check of embeddings, chat, and search |
@@ -200,24 +208,26 @@ the **Prompt Library** page. Each template is annotated with the key design deci
 ## Resilience notes
 
 - **Transient-fault retry** with exponential backoff wraps embedding and chat calls (treats
-  `408/429/5xx`, network errors, and intermittent `404 DeploymentNotFound` as transient).
-- The Azure OpenAI client API version is pinned to `2024-10-21`.
-- SDK exceptions are mapped to actionable messages (auth / missing / throttled / transient).
+  `408/429/5xx`, network errors, and AWS throttling as transient) on top of the AWS SDK's own retries.
+- Chat runs through the Bedrock **Converse** API, so the same code works across Nova, Claude, Llama,
+  etc. — switch models by changing `Bedrock:ChatModelId`.
+- SDK exceptions are mapped to actionable messages (access denied / missing / throttled / transient).
 
 ---
 
 ## Roadmap
 
-- **Entra ID** authentication on the app + **managed identity** to Azure OpenAI, Search, and Blob
-  (removing API keys entirely).
-- Azure deployment (App Service / Container Apps).
+- App-level authentication (e.g. Cognito) in front of the Blazor app.
+- Server-side hybrid search via OpenSearch **search pipelines** where the collection supports them
+  (today hybrid is done client-side with Reciprocal Rank Fusion).
+- AWS deployment (ECS Fargate / App Runner) using an **IAM task role** for all AWS access.
 
 ---
 
 ## Status
 
-Prototype built for evaluation. Not production-hardened — secrets are local user-secrets and the auth
-model is key-based pending the Entra/managed-identity work above.
+Prototype built for evaluation. Not production-hardened. AWS access relies on the ambient credential
+chain; use an IAM role with least-privilege permissions in any deployed environment.
 
 ---
 

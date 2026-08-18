@@ -5,7 +5,6 @@
 @inject IBlobDocumentSource BlobSource
 @inject IConnectionChecker ConnectionChecker
 @inject IOptions<RagOptions> RagOptions
-@inject IOptions<AzureSearchOptions> SearchOptions
 @inject ILogger<Ingest> Logger
 @using System.Globalization
 @using Microsoft.AspNetCore.Components.Forms
@@ -18,8 +17,8 @@
     <header class="studio-header">
         <h1>Documents &amp; Indexing</h1>
         <p class="subtitle">
-            Source PDFs live in @BlobSource.Description (Azure Blob Storage). Ingestion extracts text,
-            chunks it, embeds each chunk with text-embedding-3-large, and uploads to the vector index.
+            Source PDFs live in @BlobSource.Description (Amazon S3). Ingestion extracts text,
+            chunks it, embeds each chunk with Titan Text Embeddings, and uploads to the OpenSearch vector index.
         </p>
     </header>
 
@@ -60,7 +59,7 @@
 
     <section class="prompt-box">
         <div class="index-status">
-            <span>PDFs in blob container:</span>
+            <span>PDFs in S3 bucket:</span>
             <strong>@(_blobFiles?.Count.ToString() ?? "—")</strong>
             <button class="btn-secondary" @onclick="RefreshBlobs" disabled="@_busy">Refresh</button>
         </div>
@@ -79,13 +78,13 @@
         }
         else if (_blobFiles is { Count: 0 })
         {
-            <p class="doc-empty">Container is empty. Seed it with the samples or upload your own PDF below.</p>
+            <p class="doc-empty">Bucket is empty. Seed it with the samples or upload your own PDF below.</p>
         }
 
         <div class="upload-grid">
             <div class="upload-card">
                 <h3>Seed with samples</h3>
-                <p class="upload-hint">Pushes the bundled meeting-minute PDFs into the container. Handy for testing.</p>
+                <p class="upload-hint">Pushes the bundled meeting-minute PDFs into the bucket. Handy for testing.</p>
                 <button class="btn-secondary" @onclick="UploadSamples" disabled="@_busy">
                     @if (_uploading)
                     {
@@ -94,14 +93,14 @@
                     }
                     else
                     {
-                        <span>Upload samples to Blob</span>
+                        <span>Upload samples to S3</span>
                     }
                 </button>
             </div>
 
             <div class="upload-card">
                 <h3>Upload your own PDF</h3>
-                <p class="upload-hint">Pick a PDF from your machine to add it to the container.</p>
+                <p class="upload-hint">Pick a PDF from your machine to add it to the bucket.</p>
                 <InputFile OnChange="UploadFromDisk" accept=".pdf" disabled="@_busy" />
                 @if (_uploadedName is not null)
                 {
@@ -130,7 +129,7 @@
                     }
                     else
                     {
-                        <span>Ingest from Blob</span>
+                        <span>Ingest from S3</span>
                     }
                 </button>
                 <button class="btn-secondary" @onclick="RefreshIndex" disabled="@_busy">Refresh</button>
@@ -166,7 +165,7 @@
         }
         else if (_documents.Count == 0)
         {
-            <p class="doc-empty">Index is empty. Seed the container above, then <strong>Ingest from Blob</strong>.</p>
+            <p class="doc-empty">Index is empty. Seed the bucket above, then <strong>Ingest from S3</strong>.</p>
         }
         else
         {
@@ -246,7 +245,7 @@
         catch (Exception ex)
         {
             Logger.LogError(ex, "Connection check failed.");
-            _error = AzureErrorHelper.Describe(ex);
+            _error = AwsErrorHelper.Describe(ex);
         }
         finally
         {
@@ -264,8 +263,8 @@
         }
         catch (Exception ex)
         {
-            Logger.LogWarning(ex, "Could not list blobs.");
-            _error = $"Could not reach Blob Storage: {AzureErrorHelper.Describe(ex)}";
+            Logger.LogWarning(ex, "Could not list objects.");
+            _error = $"Could not reach S3: {AwsErrorHelper.Describe(ex)}";
             _blobFiles = null;
         }
     }
@@ -279,13 +278,13 @@
         try
         {
             var uploaded = await BlobSource.UploadFromFolderAsync(RagOptions.Value.SamplesPath);
-            Logger.LogInformation("Uploaded {Count} sample(s) to Blob.", uploaded.Count);
+            Logger.LogInformation("Uploaded {Count} sample(s) to S3.", uploaded.Count);
             await RefreshBlobs();
         }
         catch (Exception ex)
         {
-            Logger.LogError(ex, "Upload to Blob failed.");
-            _error = $"Upload failed: {AzureErrorHelper.Describe(ex)}";
+            Logger.LogError(ex, "Upload to S3 failed.");
+            _error = $"Upload failed: {AwsErrorHelper.Describe(ex)}";
         }
         finally
         {
@@ -313,13 +312,13 @@
             await using var stream = file.OpenReadStream(MaxUploadBytes);
             await BlobSource.UploadAsync(file.Name, stream);
             _uploadedName = file.Name;
-            Logger.LogInformation("Uploaded {File} from disk to Blob.", file.Name);
+            Logger.LogInformation("Uploaded {File} from disk to S3.", file.Name);
             await RefreshBlobs();
         }
         catch (Exception ex)
         {
             Logger.LogError(ex, "Upload from disk failed.");
-            _error = $"Upload failed: {AzureErrorHelper.Describe(ex)}";
+            _error = $"Upload failed: {AwsErrorHelper.Describe(ex)}";
         }
         finally
         {
@@ -377,7 +376,7 @@
         catch (Exception ex)
         {
             Logger.LogError(ex, "Ingestion failed.");
-            _error = $"Ingestion failed: {AzureErrorHelper.Describe(ex)}";
+            _error = $"Ingestion failed: {AwsErrorHelper.Describe(ex)}";
         }
         finally
         {
@@ -401,7 +400,7 @@
         catch (Exception ex)
         {
             Logger.LogError(ex, "Delete-all failed.");
-            _error = $"Delete failed: {AzureErrorHelper.Describe(ex)}";
+            _error = $"Delete failed: {AwsErrorHelper.Describe(ex)}";
         }
         finally
         {
