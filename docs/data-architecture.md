@@ -84,6 +84,41 @@ flowchart LR
     classDef src fill:#f8fafc,stroke:#94a3b8,color:#0f172a;
 ```
 
+### Legend
+
+**Node color = tier**
+
+| Color | Tier | Meaning |
+| --- | --- | --- |
+| 🟦 Indigo | **AWS** | Managed AWS service the app calls (SigV4-signed) |
+| 🟩 Green | **Application** | Code in the Blazor app / `MinutesStudio.Core` |
+| ⬜ Slate | **Source / actor** | A person or input outside the system |
+
+**What each node does**
+
+| Node | Tier | Role |
+| --- | --- | --- |
+| **User / analyst** | Source | Uploads PDFs and requests work products or chat answers |
+| **Local samples** | Source | Seed PDFs shipped with the app, uploaded to S3 on demand |
+| **Amazon S3** | AWS | Source-of-truth store for the raw PDF documents |
+| **IngestionService** | App | Orchestrates extract → chunk → embed → index for each PDF |
+| **RagService** | App | Runs retrieval + prompting for work products and chat Q&A |
+| **Amazon Bedrock** | AWS | Titan v2 turns text into 1024-dim embeddings; Nova generates grounded answers (Converse API) |
+| **Amazon OpenSearch** | AWS | Stores chunk vectors + text; serves k-NN and BM25 retrieval |
+
+**What each arrow means**
+
+| Arrow label | Path | Meaning |
+| --- | --- | --- |
+| `upload PDF` / `upload samples` | Write | New documents land in S3 |
+| `list + stream` | Write | Ingestion enumerates and reads PDF bytes from S3 |
+| `embed chunks` | Write | Chunk text is sent to Bedrock for embeddings |
+| `upload vectors` | Write | Chunks + vectors + metadata are indexed in OpenSearch |
+| `generate / ask` | Read | User asks for a work product or chat answer |
+| `embed query + complete` | Read | Question is embedded and the prompt is completed by Nova |
+| `retrieve / full text` | Read | Relevant chunks (or a full document) are pulled from the index |
+| `grounded, cited output` | Read | The final answer, cited back to its source passages |
+
 ---
 
 ## 3. Ingestion pipeline
