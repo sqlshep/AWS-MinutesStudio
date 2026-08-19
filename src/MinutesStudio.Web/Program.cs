@@ -7,6 +7,9 @@ using MinutesStudio.Web.Components;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Local, git-ignored overrides for machine-specific values (e.g. OpenSearch endpoint).
+builder.Configuration.AddJsonFile("appsettings.Development.local.json", optional: true, reloadOnChange: true);
+
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 

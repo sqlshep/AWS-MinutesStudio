@@ -10,7 +10,7 @@
       ],
       "Resource": [
         "arn:aws:bedrock:*::foundation-model/*",
-        "arn:aws:bedrock:*:887703234569:inference-profile/*"
+        "arn:aws:bedrock:*:<account-id>:inference-profile/*"
       ]
     },
     {
@@ -36,7 +36,7 @@
         "es:ESHttpDelete",
         "es:ESHttpHead"
       ],
-      "Resource": "arn:aws:es:us-east-1:887703234569:domain/minutes-search/*"
+      "Resource": "arn:aws:es:us-east-1:<account-id>:domain/minutes-search/*"
     }
   ]
 }
