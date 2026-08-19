@@ -51,35 +51,37 @@ or an IAM role) — SigV4-signed requests, no keys stored in the app.
 
 ## 2. High-level data flow
 
+The system has two independent paths: an **ingestion (write) path** that loads PDFs into the index,
+and a **query (read) path** that answers requests from the index. They share only S3, Bedrock, and
+OpenSearch.
+
+### Ingestion (write path)
+
 ```mermaid
 flowchart LR
-    subgraph Source
-        U[User / analyst]
-        LF[Local samples folder]
-    end
+    LF[Local samples]:::src --> S3[(Amazon S3<br/>PDFs)]:::aws
+    U([User / analyst]):::src -->|upload PDF| S3
+    S3 -->|list + stream| ING[IngestionService]:::app
+    ING -->|embed chunks| BED[Amazon Bedrock<br/>Titan embeddings]:::aws
+    ING -->|upload vectors| OS[(Amazon OpenSearch<br/>k-NN + BM25 index)]:::aws
 
-    subgraph AWS
-        S3[(Amazon S3<br/>PDFs)]
-        BEDROCK[Amazon Bedrock<br/>Titan embeddings + Nova chat]
-        SEARCH[(Amazon OpenSearch<br/>k-NN + BM25 index)]
-    end
+    classDef aws fill:#eef2ff,stroke:#6366f1,color:#1e1b4b;
+    classDef app fill:#ecfdf5,stroke:#10b981,color:#064e3b;
+    classDef src fill:#f8fafc,stroke:#94a3b8,color:#0f172a;
+```
 
-    subgraph App[Blazor Web App + MinutesStudio.Core]
-        ING[IngestionService]
-        RAG[RagService]
-    end
+### Query (read path)
 
-    LF -->|Upload samples| S3
-    U -->|Upload PDF| S3
-
-    S3 -->|list + stream| ING
-    ING -->|embed chunks| BEDROCK
-    ING -->|upload vectors| SEARCH
-
-    U -->|Generate / Ask| RAG
-    RAG -->|retrieve / full text| SEARCH
-    RAG -->|embed query + complete| BEDROCK
+```mermaid
+flowchart LR
+    U([User / analyst]):::src -->|generate / ask| RAG[RagService]:::app
+    RAG -->|embed query + complete| BED[Amazon Bedrock<br/>Titan + Nova chat]:::aws
+    RAG -->|retrieve / full text| OS[(Amazon OpenSearch<br/>k-NN + BM25 index)]:::aws
     RAG -->|grounded, cited output| U
+
+    classDef aws fill:#eef2ff,stroke:#6366f1,color:#1e1b4b;
+    classDef app fill:#ecfdf5,stroke:#10b981,color:#064e3b;
+    classDef src fill:#f8fafc,stroke:#94a3b8,color:#0f172a;
 ```
 
 ---
